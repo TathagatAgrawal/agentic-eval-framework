@@ -20,8 +20,8 @@ requires_live_api = pytest.mark.skipif(
 def test_settings_load_model_defaults() -> None:
     """Settings must load from .env and fall back to the configured model defaults."""
     settings = get_settings()
-    assert settings.agent_model == "gemini-flash-latest"
-    assert settings.classifier_model == "gemini-flash-lite-latest"
+    assert settings.agent_model == "gemini-3.5-flash-lite"
+    assert settings.classifier_model == "gemini-3.5-flash-lite"
     assert settings.google_api_key.get_secret_value() != ""
 
 

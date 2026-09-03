@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     google_api_key: SecretStr
-    agent_model: str = "gemini-flash-latest"
-    classifier_model: str = "gemini-flash-lite-latest"
+    agent_model: str = "gemini-3.5-flash-lite"
+    classifier_model: str = "gemini-3.5-flash-lite"
     db_path: Path = Path("data/synthetic_transactions.db")
     max_tool_steps: int = 6
     groundedness_retry_limit: int = 1

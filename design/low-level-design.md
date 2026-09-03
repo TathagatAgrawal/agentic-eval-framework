@@ -247,8 +247,8 @@ Held in-process for the CLI's interactive `chat` session (a plain object passed 
 ```python
 class Settings(BaseSettings):
     google_api_key: SecretStr
-    agent_model: str = "gemini-flash-latest"
-    classifier_model: str = "gemini-flash-lite-latest"  # cheaper model for route/contextualize
+    agent_model: str = "gemini-3.5-flash-lite"
+    classifier_model: str = "gemini-3.5-flash-lite"  # kept as a separate setting so route/contextualize can move to a different model independently of the agent loop
     db_path: Path = Path("data/synthetic_transactions.db")
     max_tool_steps: int = 6
     groundedness_retry_limit: int = 1
@@ -360,7 +360,7 @@ Streamlit app reading the regression store:
 finance-qna chat                 # interactive multi-turn session (in-process SessionMemory)
 finance-qna ask "<question>"     # single-shot Q&A, prints answer + trace
 finance-qna data generate --seed 42
-finance-qna eval run [--suite single_turn|multi_turn|all] [--model gemini-flash-latest]
+finance-qna eval run [--suite single_turn|multi_turn|all] [--model gemini-3.5-flash-lite]
 finance-qna eval dashboard       # launches Streamlit
 ```
 
