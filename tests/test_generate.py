@@ -1,3 +1,5 @@
+"""Tests for the synthetic data generator: determinism and labeled ground truth."""
+
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -10,6 +12,7 @@ from finance_qna.data.schema import merchants, transactions
 
 
 def test_generate_is_deterministic(tmp_path: Path) -> None:
+    """Two runs with the same seed must produce byte-identical DB and ground truth."""
     db_a = tmp_path / "a.db"
     gt_a = tmp_path / "a_ground_truth.json"
     db_b = tmp_path / "b.db"
@@ -23,6 +26,7 @@ def test_generate_is_deterministic(tmp_path: Path) -> None:
 
 
 def test_generate_produces_rows_and_matching_ground_truth(tmp_path: Path) -> None:
+    """The row count in the database must match the count recorded in ground_truth.json."""
     db_path = tmp_path / "test.db"
     gt_path = tmp_path / "ground_truth.json"
     generate(seed=42, db_path=db_path, ground_truth_path=gt_path)
@@ -37,6 +41,8 @@ def test_generate_produces_rows_and_matching_ground_truth(tmp_path: Path) -> Non
 
 
 def test_subscription_price_change_is_labeled_and_present(tmp_path: Path) -> None:
+    """The labeled subscription's transactions must switch from old to new amount
+    exactly at the labeled change month."""
     db_path = tmp_path / "test.db"
     gt_path = tmp_path / "ground_truth.json"
     generate(seed=42, db_path=db_path, ground_truth_path=gt_path)
@@ -63,6 +69,8 @@ def test_subscription_price_change_is_labeled_and_present(tmp_path: Path) -> Non
 
 
 def test_spike_event_is_labeled_and_reflected_in_totals(tmp_path: Path) -> None:
+    """The labeled spike month's category total must exceed every other month's total
+    for that category."""
     db_path = tmp_path / "test.db"
     gt_path = tmp_path / "ground_truth.json"
     generate(seed=42, db_path=db_path, ground_truth_path=gt_path)

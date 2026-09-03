@@ -107,22 +107,28 @@ SPIKE_EXTRA_AMOUNT = Decimal("650.00")
 
 
 def _quantize(amount: Decimal) -> Decimal:
+    """Round a Decimal amount to 2 decimal places (currency precision), half-up."""
     return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def _inserted_id(result: CursorResult[Any]) -> int:
+    """Extract the auto-generated integer primary key from a single-row insert result."""
     pk = result.inserted_primary_key
     assert pk is not None
     return int(pk[0])
 
 
 def _month_starts(reference_date: date, num_months: int) -> list[date]:
+    """Return the first-of-month date for each of the `num_months` months ending in
+    `reference_date`'s month, oldest first."""
     first_month = (reference_date.replace(day=1)) - relativedelta(months=num_months - 1)
     return [first_month + relativedelta(months=i) for i in range(num_months)]
 
 
 @dataclass
 class GeneratedTransaction:
+    """A single synthetic transaction before it has been written to the database."""
+
     account_name: str
     merchant_name: str
     category_name: str
@@ -134,6 +140,9 @@ class GeneratedTransaction:
 
 @dataclass
 class GenerationResult:
+    """The full output of one generation run: transactions plus the ground-truth
+    aggregates and labeled events derived from them."""
+
     transactions: list[GeneratedTransaction] = field(default_factory=list)
     monthly_category_totals: dict[str, dict[str, str]] = field(default_factory=dict)
     subscription_change_event: dict[str, str] = field(default_factory=dict)
@@ -141,6 +150,8 @@ class GenerationResult:
 
 
 def _generate_transactions(seed: int) -> GenerationResult:
+    """Generate the full set of synthetic transactions and their ground-truth
+    aggregates for the given seed, without touching the database."""
     rng = random.Random(seed)
     fake = Faker()
     fake.seed_instance(seed)
