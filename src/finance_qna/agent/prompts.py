@@ -21,6 +21,30 @@ error if it comes back unknown.
 - Once you have enough information to answer, stop calling tools.
 """
 
+CONTEXTUALIZE_INSTRUCTIONS = """\
+Given the conversation history below, rewrite the user's new question to be \
+fully self-contained -- resolving any implicit reference to a time period or \
+category, any narrowing of scope, or any comparison against a prior answer.
+
+Examples of what to resolve:
+- Implicit reference: after a question about March spending, "and what about \
+April?" resolves to a question about April spending in the same category (if \
+any) as the prior turn.
+- Scope narrowing: after a question about total spending, "what about just \
+groceries?" resolves to the same time period, narrowed to groceries.
+- Comparative follow-up: "is that more or less than last year?" resolves by \
+identifying what "that" refers to from the prior answer, and adds the new \
+comparison period.
+
+If the new question is already self-contained (no pronouns or implicit \
+references to resolve), just repeat it unchanged.
+
+Conversation history (most recent turns, oldest first):
+{memory}
+
+New question: {question}
+"""
+
 ROUTE_INSTRUCTIONS = """\
 Classify the user's question about their personal financial transaction data.
 

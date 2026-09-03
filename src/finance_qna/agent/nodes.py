@@ -16,15 +16,17 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ValidationError
 
 from finance_qna.agent.answer import StructuredAnswer
+from finance_qna.agent.contextualize import ContextualizeResult
 from finance_qna.agent.groundedness import verify
 from finance_qna.agent.prompts import (
     CLARIFY_INSTRUCTIONS,
+    CONTEXTUALIZE_INSTRUCTIONS,
     DRAFT_ANSWER_INSTRUCTIONS,
     REFUSE_INSTRUCTIONS,
     ROUTE_INSTRUCTIONS,
 )
 from finance_qna.agent.route import RouteDecision
-from finance_qna.agent.state import AgentState, LedgerEntry
+from finance_qna.agent.state import AgentState, LedgerEntry, TurnMemory
 from finance_qna.tools.errors import CategoryNotFoundError
 
 
@@ -56,6 +58,38 @@ def extract_text(content: Any) -> str:
         elif isinstance(block, dict) and block.get("type") == "text":
             parts.append(str(block.get("text", "")))
     return "".join(parts)
+
+
+def format_session_memory(turns: list[TurnMemory]) -> str:
+    """Render prior turns as text for the contextualize prompt."""
+    if not turns:
+        return "(no prior turns)"
+    return "\n".join(
+        f"Turn {t['turn_id']}: Q: {t['resolved_question']!r} -> A: {t['final_answer']!r}"
+        for t in turns
+    )
+
+
+def make_contextualize_node(llm: BaseChatModel) -> Any:
+    """Build the `contextualize` node: resolves the question against prior turns
+    before anything else runs."""
+    structured_llm = llm.with_structured_output(ContextualizeResult)
+
+    def contextualize(state: AgentState) -> dict[str, Any]:
+        """Resolve `state['question']` into a self-contained question, or flag it
+        as ambiguous, using `state['session_memory']` as context."""
+        memory_text = format_session_memory(state["session_memory"])
+        prompt = CONTEXTUALIZE_INSTRUCTIONS.format(question=state["question"], memory=memory_text)
+        result = structured_llm.invoke([HumanMessage(content=prompt)])
+        assert isinstance(result, ContextualizeResult)
+        return {
+            "resolved_question": result.resolved_question,
+            "is_ambiguous": result.is_ambiguous,
+            "ambiguity_reason": result.ambiguity_reason,
+            "messages": [*state["messages"], HumanMessage(content=result.resolved_question)],
+        }
+
+    return contextualize
 
 
 def make_act_node(llm: BaseChatModel, tools: list[BaseTool]) -> Any:
@@ -147,7 +181,9 @@ def make_draft_answer_node(llm: BaseChatModel) -> Any:
             or "(no tool calls were made)"
         )
 
-        prompt = DRAFT_ANSWER_INSTRUCTIONS.format(question=state["question"], ledger=ledger_text)
+        prompt = DRAFT_ANSWER_INSTRUCTIONS.format(
+            question=state["resolved_question"], ledger=ledger_text
+        )
         result = structured_llm.invoke([HumanMessage(content=prompt)])
         assert isinstance(result, StructuredAnswer)
         return {"draft_answer": result}
@@ -161,8 +197,17 @@ def make_route_node(llm: BaseChatModel) -> Any:
     structured_llm = llm.with_structured_output(RouteDecision)
 
     def route(state: AgentState) -> dict[str, Any]:
-        """Classify `state['question']` and record the route and its reason."""
-        prompt = ROUTE_INSTRUCTIONS.format(question=state["question"])
+        """Classify the resolved question and record the route and its reason.
+
+        If `contextualize` already flagged the question as ambiguous, that
+        decision is honored directly without spending another LLM call.
+        """
+        if state["is_ambiguous"]:
+            return {
+                "route": "clarify",
+                "route_reason": state["ambiguity_reason"] or "the question is ambiguous",
+            }
+        prompt = ROUTE_INSTRUCTIONS.format(question=state["resolved_question"])
         decision = structured_llm.invoke([HumanMessage(content=prompt)])
         assert isinstance(decision, RouteDecision)
         return {"route": decision.route, "route_reason": decision.reason}

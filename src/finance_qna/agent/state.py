@@ -1,15 +1,21 @@
 """The LangGraph state schema for the agent's turn loop.
 
-This slice adds `groundedness_ok`, `retry_count`, and `final_answer` on top of
-the routing-and-ReAct slice, so a draft answer is verified against the ledger
-before it's shown to the user, with a bounded retry before falling back to a
-caveated response. Cross-turn memory fields are added in the next slice per the
-LLD's incremental build plan.
+This slice adds `resolved_question`, `is_ambiguous`, `ambiguity_reason`, and
+`session_memory` on top of the groundedness slice, so a follow-up question can
+be resolved against prior turns before routing/acting. The graph itself stays a
+pure function of `AgentState` -- it reads `session_memory` as input but does not
+mutate an external session object; the caller (the CLI's chat loop, in a later
+phase) is responsible for turning the returned state into a `TurnMemory` and
+appending it to its own `SessionMemory` between turns. Because `messages` starts
+fresh each turn (no HumanMessage until `contextualize` adds the resolved one),
+cross-turn continuity flows entirely through `session_memory`, not raw chat
+history -- this is what keeps reference resolution grounded in something
+unambiguous rather than free text, per the LLD's conversational-memory design.
 """
 
 from typing import Any, Literal, TypedDict
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 
 from finance_qna.agent.answer import StructuredAnswer
 from finance_qna.agent.prompts import SYSTEM_PROMPT
@@ -26,10 +32,26 @@ class LedgerEntry(TypedDict):
     timestamp: str
 
 
+class TurnMemory(TypedDict):
+    """A completed turn's structured summary, kept across turns in a session so
+    follow-up questions can resolve against what was actually established
+    (not just what was said)."""
+
+    turn_id: int
+    raw_question: str
+    resolved_question: str
+    final_answer: str
+    ledger: list[LedgerEntry]
+
+
 class AgentState(TypedDict):
     """The full state threaded through the agent's LangGraph nodes for one turn."""
 
     question: str
+    resolved_question: str | None
+    is_ambiguous: bool
+    ambiguity_reason: str | None
+    session_memory: list[TurnMemory]
     messages: list[BaseMessage]
     ledger: list[LedgerEntry]
     draft_answer: StructuredAnswer | None
@@ -40,11 +62,16 @@ class AgentState(TypedDict):
     final_answer: str | None
 
 
-def initial_state(question: str) -> AgentState:
-    """Build the starting state for a single-turn run of the graph."""
+def initial_state(question: str, session_memory: list[TurnMemory] | None = None) -> AgentState:
+    """Build the starting state for one turn, optionally carrying prior turns'
+    `TurnMemory` for follow-up reference resolution."""
     return AgentState(
         question=question,
-        messages=[SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=question)],
+        resolved_question=None,
+        is_ambiguous=False,
+        ambiguity_reason=None,
+        session_memory=session_memory or [],
+        messages=[SystemMessage(content=SYSTEM_PROMPT)],
         ledger=[],
         draft_answer=None,
         route=None,
@@ -52,4 +79,18 @@ def initial_state(question: str) -> AgentState:
         groundedness_ok=False,
         retry_count=0,
         final_answer=None,
+    )
+
+
+def turn_memory_from_state(state: AgentState) -> TurnMemory:
+    """Build the `TurnMemory` a caller should append to its `SessionMemory` after
+    a graph run completes, so the next turn can resolve follow-ups against it."""
+    assert state["resolved_question"] is not None
+    assert state["final_answer"] is not None
+    return TurnMemory(
+        turn_id=len(state["session_memory"]) + 1,
+        raw_question=state["question"],
+        resolved_question=state["resolved_question"],
+        final_answer=state["final_answer"],
+        ledger=state["ledger"],
     )

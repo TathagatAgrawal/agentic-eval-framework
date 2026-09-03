@@ -11,9 +11,12 @@ from langchain_core.messages import AIMessage
 from sqlalchemy import Engine
 
 from finance_qna.agent.answer import Claim, StructuredAnswer
+from finance_qna.agent.contextualize import ContextualizeResult
 from finance_qna.agent.nodes import (
+    format_session_memory,
     make_act_node,
     make_clarify_node,
+    make_contextualize_node,
     make_draft_answer_node,
     make_ground_check_node,
     make_ground_router,
@@ -24,7 +27,7 @@ from finance_qna.agent.nodes import (
     route_edge,
 )
 from finance_qna.agent.route import RouteDecision
-from finance_qna.agent.state import AgentState, initial_state
+from finance_qna.agent.state import AgentState, TurnMemory, initial_state
 from finance_qna.tools.registry import build_tools
 from tests.fakes import FakeLLM
 
@@ -151,6 +154,7 @@ def test_draft_answer_node_returns_scripted_structured_answer() -> None:
     draft_answer = make_draft_answer_node(fake_llm)
 
     state: AgentState = initial_state("How much did I spend on dining?")
+    state["resolved_question"] = "How much did I spend on dining?"
     state["ledger"] = [
         {
             "ledger_id": "L1",
@@ -305,3 +309,60 @@ def test_ground_router_falls_back_to_caveat_once_retries_are_exhausted() -> None
     state["retry_count"] = 2
 
     assert router(state) == "respond_with_caveat"
+
+
+def test_format_session_memory_with_no_prior_turns() -> None:
+    """An empty turn history must render as an explicit placeholder, not an empty string."""
+    assert format_session_memory([]) == "(no prior turns)"
+
+
+def test_format_session_memory_renders_prior_turns() -> None:
+    """Prior turns must render with their resolved question and final answer."""
+    turn: TurnMemory = {
+        "turn_id": 1,
+        "raw_question": "How much on dining last quarter?",
+        "resolved_question": "How much did I spend on dining in Q1 2025?",
+        "final_answer": "You spent $1,240.50 on dining in Q1 2025.",
+        "ledger": [],
+    }
+
+    text = format_session_memory([turn])
+
+    assert "Q1 2025" in text
+    assert "$1,240.50" in text
+
+
+def test_contextualize_node_resolves_question_and_appends_human_message() -> None:
+    """The contextualize node must store the resolved question, ambiguity flag,
+    and append a HumanMessage with the resolved text for the act loop to use."""
+    scripted = ContextualizeResult(
+        resolved_question="How much did I spend on groceries in Q1 2025?",
+        is_ambiguous=False,
+    )
+    fake_llm = FakeLLM(structured_responses={"ContextualizeResult": [scripted]})
+    contextualize = make_contextualize_node(fake_llm)
+
+    state = initial_state("What about groceries?")
+    update = contextualize(state)
+
+    assert update["resolved_question"] == scripted.resolved_question
+    assert update["is_ambiguous"] is False
+    assert update["ambiguity_reason"] is None
+    assert update["messages"][-1].content == scripted.resolved_question
+
+
+def test_contextualize_node_flags_genuine_ambiguity() -> None:
+    """When resolution genuinely fails, the node must record why."""
+    scripted = ContextualizeResult(
+        resolved_question="How much did I spend this month?",
+        is_ambiguous=True,
+        ambiguity_reason="no prior turn establishes a time period",
+    )
+    fake_llm = FakeLLM(structured_responses={"ContextualizeResult": [scripted]})
+    contextualize = make_contextualize_node(fake_llm)
+
+    state = initial_state("How much did I spend this month?")
+    update = contextualize(state)
+
+    assert update["is_ambiguous"] is True
+    assert update["ambiguity_reason"] == "no prior turn establishes a time period"

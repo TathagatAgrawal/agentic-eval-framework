@@ -1,10 +1,11 @@
 """End-to-end tests of the compiled agent graph, with the LLM fully mocked.
 
-These verify the graph wiring itself -- route -> act -> tool_node -> act ->
-draft_answer -> ground_check -> respond (or retry / caveat), and the
-clarify/refuse short-circuit paths -- without spending any real Gemini quota.
-Tool execution against the fixture database is real, so groundedness checks in
-these tests run against genuine tool results, not scripted numbers.
+These verify the graph wiring itself -- contextualize -> route -> act ->
+tool_node -> act -> draft_answer -> ground_check -> respond (or retry /
+caveat), the clarify/refuse short-circuit paths, and multi-turn TurnMemory
+wiring -- without spending any real Gemini quota. Tool execution against the
+fixture database is real, so groundedness checks in these tests run against
+genuine tool results, not scripted numbers.
 """
 
 from decimal import Decimal
@@ -13,9 +14,10 @@ from langchain_core.messages import AIMessage
 from sqlalchemy import Engine
 
 from finance_qna.agent.answer import Claim, StructuredAnswer
+from finance_qna.agent.contextualize import ContextualizeResult
 from finance_qna.agent.graph import build_graph
 from finance_qna.agent.route import RouteDecision
-from finance_qna.agent.state import initial_state
+from finance_qna.agent.state import initial_state, turn_memory_from_state
 from finance_qna.tools.models import DateRange, TransactionFilter
 from finance_qna.tools.query_tools import aggregate_spending
 from tests.fakes import FakeLLM
@@ -36,6 +38,11 @@ def _tool_call(call_id: str) -> dict:
     }
 
 
+def _unambiguous(question: str) -> ContextualizeResult:
+    """Build a ContextualizeResult that resolves `question` to itself, unambiguously."""
+    return ContextualizeResult(resolved_question=question, is_ambiguous=False)
+
+
 def _real_dining_july_2024_total(fixture_engine: Engine) -> Decimal:
     """Look up the real Dining/July-2024 total directly, so grounded test claims
     match what the tool actually returns rather than an arbitrary scripted value."""
@@ -48,8 +55,9 @@ def _real_dining_july_2024_total(fixture_engine: Engine) -> Decimal:
 
 
 def test_graph_calls_one_tool_then_respond_with_a_grounded_answer(fixture_engine: Engine) -> None:
-    """The graph must run route -> act -> tool_node -> act -> draft_answer ->
-    ground_check -> respond when the draft answer is properly grounded."""
+    """The graph must run contextualize -> route -> act -> tool_node -> act ->
+    draft_answer -> ground_check -> respond when the draft answer is grounded."""
+    question = "How much did I spend on dining in July 2024?"
     real_total = _real_dining_july_2024_total(fixture_engine)
     scripted_answer = StructuredAnswer(
         text=f"You spent ${real_total} on dining in July 2024.",
@@ -57,6 +65,7 @@ def test_graph_calls_one_tool_then_respond_with_a_grounded_answer(fixture_engine
     )
     fake_llm = FakeLLM(
         structured_responses={
+            "ContextualizeResult": [_unambiguous(question)],
             "RouteDecision": [RouteDecision(route="answer", reason="unambiguous")],
             "StructuredAnswer": [scripted_answer],
         },
@@ -67,8 +76,9 @@ def test_graph_calls_one_tool_then_respond_with_a_grounded_answer(fixture_engine
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
-    result = graph.invoke(initial_state("How much did I spend on dining in July 2024?"))
+    result = graph.invoke(initial_state(question))
 
+    assert result["resolved_question"] == question
     assert result["route"] == "answer"
     assert len(result["ledger"]) == 1
     assert result["groundedness_ok"] is True
@@ -80,11 +90,13 @@ def test_graph_stops_at_max_tool_steps_even_if_model_keeps_requesting_tools(
 ) -> None:
     """The loop guard must force draft_answer once max_tool_steps ledger entries exist,
     even when the model would otherwise keep requesting more tool calls."""
+    question = "How much did I spend on dining?"
     scripted_answer = StructuredAnswer(text="Here's what I found so far.", claims=[])
     # Script more tool-call responses than max_tool_steps allows; the router should
     # never let act run enough times to exhaust this list.
     fake_llm = FakeLLM(
         structured_responses={
+            "ContextualizeResult": [_unambiguous(question)],
             "RouteDecision": [RouteDecision(route="answer", reason="unambiguous")],
             "StructuredAnswer": [scripted_answer],
         },
@@ -94,7 +106,7 @@ def test_graph_stops_at_max_tool_steps_even_if_model_keeps_requesting_tools(
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=2)
-    result = graph.invoke(initial_state("How much did I spend on dining?"))
+    result = graph.invoke(initial_state(question))
 
     assert len(result["ledger"]) == 2
     assert result["final_answer"] == scripted_answer.text
@@ -103,6 +115,7 @@ def test_graph_stops_at_max_tool_steps_even_if_model_keeps_requesting_tools(
 def test_graph_retries_once_then_succeeds_after_ungrounded_draft(fixture_engine: Engine) -> None:
     """An ungrounded first draft must trigger exactly one retry through act, then
     a corrected, grounded second draft must be accepted."""
+    question = "How much did I spend on dining in July 2024?"
     real_total = _real_dining_july_2024_total(fixture_engine)
     ungrounded_answer = StructuredAnswer(
         text="You spent $999999.99 on dining.",
@@ -114,6 +127,7 @@ def test_graph_retries_once_then_succeeds_after_ungrounded_draft(fixture_engine:
     )
     fake_llm = FakeLLM(
         structured_responses={
+            "ContextualizeResult": [_unambiguous(question)],
             "RouteDecision": [RouteDecision(route="answer", reason="unambiguous")],
             "StructuredAnswer": [ungrounded_answer, grounded_answer],
         },
@@ -127,7 +141,7 @@ def test_graph_retries_once_then_succeeds_after_ungrounded_draft(fixture_engine:
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6, groundedness_retry_limit=1)
-    result = graph.invoke(initial_state("How much did I spend on dining in July 2024?"))
+    result = graph.invoke(initial_state(question))
 
     assert result["retry_count"] == 1
     assert result["groundedness_ok"] is True
@@ -137,12 +151,14 @@ def test_graph_retries_once_then_succeeds_after_ungrounded_draft(fixture_engine:
 def test_graph_falls_back_to_caveat_after_exhausting_retries(fixture_engine: Engine) -> None:
     """If every retry still produces an ungrounded draft, the graph must fall back
     to a caveated response instead of silently returning an unverified number."""
+    question = "How much did I spend on dining in July 2024?"
     ungrounded_answer = StructuredAnswer(
         text="You spent $999999.99 on dining.",
         claims=[Claim(value=Decimal("999999.99"), ledger_id="L1")],
     )
     fake_llm = FakeLLM(
         structured_responses={
+            "ContextualizeResult": [_unambiguous(question)],
             "RouteDecision": [RouteDecision(route="answer", reason="unambiguous")],
             "StructuredAnswer": [ungrounded_answer, ungrounded_answer],
         },
@@ -153,7 +169,7 @@ def test_graph_falls_back_to_caveat_after_exhausting_retries(fixture_engine: Eng
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6, groundedness_retry_limit=0)
-    result = graph.invoke(initial_state("How much did I spend on dining in July 2024?"))
+    result = graph.invoke(initial_state(question))
 
     assert result["groundedness_ok"] is False
     assert result["final_answer"] is not None
@@ -162,17 +178,20 @@ def test_graph_falls_back_to_caveat_after_exhausting_retries(fixture_engine: Eng
 
 
 def test_graph_clarify_path_never_calls_any_tool(fixture_engine: Engine) -> None:
-    """When route chooses "clarify", the graph must go straight to a clarifying
-    question with zero tool calls and an empty ledger."""
+    """When route chooses "clarify" (via its own LLM classification, not the
+    contextualize shortcut), the graph must go straight to a clarifying question
+    with zero tool calls and an empty ledger."""
+    question = "How much did I spend this month?"
     fake_llm = FakeLLM(
         structured_responses={
+            "ContextualizeResult": [_unambiguous(question)],
             "RouteDecision": [RouteDecision(route="clarify", reason="ambiguous time period")],
         },
         invoke_responses=[AIMessage(content="Which month did you mean?")],
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
-    result = graph.invoke(initial_state("How much did I spend this month?"))
+    result = graph.invoke(initial_state(question))
 
     assert result["route"] == "clarify"
     assert result["ledger"] == []
@@ -182,16 +201,81 @@ def test_graph_clarify_path_never_calls_any_tool(fixture_engine: Engine) -> None
 def test_graph_refuse_path_never_calls_any_tool(fixture_engine: Engine) -> None:
     """When route chooses "refuse", the graph must go straight to a decline
     message with zero tool calls and an empty ledger."""
+    question = "Should I invest in index funds?"
     fake_llm = FakeLLM(
         structured_responses={
+            "ContextualizeResult": [_unambiguous(question)],
             "RouteDecision": [RouteDecision(route="refuse", reason="not about the data")],
         },
         invoke_responses=[AIMessage(content="I can only answer questions about your spending.")],
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
-    result = graph.invoke(initial_state("Should I invest in index funds?"))
+    result = graph.invoke(initial_state(question))
 
     assert result["route"] == "refuse"
     assert result["ledger"] == []
     assert result["final_answer"] == "I can only answer questions about your spending."
+
+
+def test_graph_honors_contextualize_ambiguity_without_calling_route_classifier(
+    fixture_engine: Engine,
+) -> None:
+    """When contextualize itself flags ambiguity, route must go straight to
+    "clarify" without spending an LLM call on classification."""
+    question = "How much did I spend this month?"
+    fake_llm = FakeLLM(
+        structured_responses={
+            "ContextualizeResult": [
+                ContextualizeResult(
+                    resolved_question=question,
+                    is_ambiguous=True,
+                    ambiguity_reason="no prior turn establishes which month 'this month' means",
+                )
+            ],
+            # deliberately no RouteDecision scripted: if route() called the
+            # classifier here, this test would raise StopIteration
+        },
+        invoke_responses=[AIMessage(content="Which month would you like?")],
+    )
+
+    graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
+    result = graph.invoke(initial_state(question))
+
+    assert result["route"] == "clarify"
+    assert "no prior turn" in (result["route_reason"] or "")
+    assert result["final_answer"] == "Which month would you like?"
+
+
+def test_turn_memory_carries_forward_into_the_next_graph_invocation(fixture_engine: Engine) -> None:
+    """A completed turn's TurnMemory, built via turn_memory_from_state, must be
+    exactly what the next initial_state call receives as session_memory."""
+    first_question = "How much did I spend on dining in July 2024?"
+    real_total = _real_dining_july_2024_total(fixture_engine)
+    scripted_answer = StructuredAnswer(
+        text=f"You spent ${real_total} on dining in July 2024.",
+        claims=[Claim(value=real_total, ledger_id="L1")],
+    )
+    fake_llm = FakeLLM(
+        structured_responses={
+            "ContextualizeResult": [_unambiguous(first_question)],
+            "RouteDecision": [RouteDecision(route="answer", reason="unambiguous")],
+            "StructuredAnswer": [scripted_answer],
+        },
+        tool_call_responses=[
+            AIMessage(content="", tool_calls=[_tool_call("call_1")]),
+            AIMessage(content="I have enough information now."),
+        ],
+    )
+
+    graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
+    first_result = graph.invoke(initial_state(first_question))
+
+    turn = turn_memory_from_state(first_result)
+    assert turn["turn_id"] == 1
+    assert turn["raw_question"] == first_question
+    assert turn["final_answer"] == scripted_answer.text
+    assert turn["ledger"] == first_result["ledger"]
+
+    second_state = initial_state("What about groceries?", session_memory=[turn])
+    assert second_state["session_memory"] == [turn]
