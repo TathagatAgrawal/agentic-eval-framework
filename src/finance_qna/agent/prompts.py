@@ -59,13 +59,19 @@ DRAFT_ANSWER_INSTRUCTIONS = """\
 Using ONLY the tool results below (the "ledger"), write a final answer to the \
 user's question.
 
-Every numeric value in your answer text must appear in the `claims` list, citing \
-the `ledger_id` of the ledger entry it came from. If a number is derived from \
-more than one ledger entry (e.g. a sum or a percentage), set `computation` to a \
-short description of how it was derived and still cite the ledger_id(s) it's \
-computed from in `computation` text.
+Every FINANCIAL figure in your answer text -- a dollar amount, a transaction \
+count, or a computed metric like a percentage change -- must appear in the \
+`claims` list, citing the `ledger_id` of the ledger entry it came from. If a \
+figure is derived from more than one ledger entry (e.g. a sum or a percentage), \
+set `computation` to a short description of how it was derived and still cite \
+the ledger_id(s) it's computed from in `computation` text.
 
-Do not introduce any number that isn't traceable to a ledger entry.
+Do NOT add a claim for a number that is just part of how you phrased the \
+question's own time period or category (e.g. a year or month number quoted back \
+from the question, like "2025" in "last quarter of 2025") -- only claim figures \
+that actually came from a tool result.
+
+Do not introduce any financial figure that isn't traceable to a ledger entry.
 
 Question: {question}
 

@@ -16,6 +16,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ValidationError
 
 from finance_qna.agent.answer import StructuredAnswer
+from finance_qna.agent.groundedness import verify
 from finance_qna.agent.prompts import (
     CLARIFY_INSTRUCTIONS,
     DRAFT_ANSWER_INSTRUCTIONS,
@@ -184,7 +185,11 @@ def make_clarify_node(llm: BaseChatModel) -> Any:
             question=state["question"], reason=state["route_reason"] or ""
         )
         response = llm.invoke([HumanMessage(content=prompt)])
-        return {"draft_answer": StructuredAnswer(text=extract_text(response.content), claims=[])}
+        text = extract_text(response.content)
+        return {
+            "draft_answer": StructuredAnswer(text=text, claims=[]),
+            "final_answer": text,
+        }
 
     return clarify
 
@@ -198,6 +203,82 @@ def make_refuse_node(llm: BaseChatModel) -> Any:
             question=state["question"], reason=state["route_reason"] or ""
         )
         response = llm.invoke([HumanMessage(content=prompt)])
-        return {"draft_answer": StructuredAnswer(text=extract_text(response.content), claims=[])}
+        text = extract_text(response.content)
+        return {
+            "draft_answer": StructuredAnswer(text=text, claims=[]),
+            "final_answer": text,
+        }
 
     return refuse
+
+
+def make_ground_check_node() -> Any:
+    """Build the `ground_check` node: a pure, LLM-free verification of the draft
+    answer's claims against this turn's ledger."""
+
+    def ground_check(state: AgentState) -> dict[str, Any]:
+        """Verify `state['draft_answer']` and, if unsupported, note it for a retry."""
+        assert state["draft_answer"] is not None
+        result = verify(state["draft_answer"], state["ledger"])
+        if result.ok:
+            return {"groundedness_ok": True}
+
+        unsupported_desc = "; ".join(
+            f"{claim.value} (cited {claim.ledger_id})" for claim in result.unsupported
+        )
+        note = HumanMessage(
+            content=(
+                "The following claimed values in your last answer could not be verified "
+                f"against tool results: {unsupported_desc}. Call whatever tools you need to "
+                "confirm them, or revise your answer to remove them."
+            )
+        )
+        return {
+            "groundedness_ok": False,
+            "retry_count": state["retry_count"] + 1,
+            "messages": [*state["messages"], note],
+        }
+
+    return ground_check
+
+
+def make_ground_router(retry_limit: int) -> Any:
+    """Build the conditional-edge function deciding what to do after a groundedness
+    check: accept the answer, retry, or fall back to a caveated response."""
+
+    def ground_router(state: AgentState) -> Literal["respond", "act", "respond_with_caveat"]:
+        """Route based on whether the draft answer passed and how many retries are left."""
+        if state["groundedness_ok"]:
+            return "respond"
+        if state["retry_count"] <= retry_limit:
+            return "act"
+        return "respond_with_caveat"
+
+    return ground_router
+
+
+def make_respond_node() -> Any:
+    """Build the `respond` node: finalizes a groundedness-verified draft answer."""
+
+    def respond(state: AgentState) -> dict[str, Any]:
+        """Copy the verified draft answer's text into `final_answer`."""
+        assert state["draft_answer"] is not None
+        return {"final_answer": state["draft_answer"].text}
+
+    return respond
+
+
+def make_respond_with_caveat_node() -> Any:
+    """Build the `respond_with_caveat` node: used when groundedness still fails
+    after every retry, so an unverified number is never returned silently."""
+
+    def respond_with_caveat(state: AgentState) -> dict[str, Any]:
+        """Prepend a disclosure to the draft answer's text and finalize it."""
+        assert state["draft_answer"] is not None
+        caveat = (
+            "Note: I could not fully verify one or more figures below against the "
+            "underlying data. Please double-check before relying on them.\n\n"
+        )
+        return {"final_answer": caveat + state["draft_answer"].text}
+
+    return respond_with_caveat

@@ -1,11 +1,13 @@
-"""Assembles the agent's LangGraph state machine (routing + ReAct slice).
+"""Assembles the agent's LangGraph state machine (routing + ReAct + groundedness).
 
 Graph shape for this slice: route classifies the question first; "clarify" and
-"refuse" go straight to a short response with no tool calls; "answer" enters the
+"refuse" go straight to a short response with no tool calls. "answer" enters the
 act/tool_node loop until it stops requesting tools or the step limit is hit, then
-draft_answer produces the final, ledger-cited answer. Groundedness checking and
-multi-turn memory are added on top of this in the next slice per the LLD's
-incremental build plan.
+draft_answer produces a candidate answer, which ground_check verifies against the
+ledger -- accepting it, sending it back to act for one bounded retry with a note
+about what was unsupported, or falling back to a caveated response once retries
+are exhausted. Cross-turn memory is added on top of this in the next slice per
+the LLD's incremental build plan.
 """
 
 from typing import Any
@@ -18,7 +20,11 @@ from finance_qna.agent.nodes import (
     make_act_node,
     make_clarify_node,
     make_draft_answer_node,
+    make_ground_check_node,
+    make_ground_router,
     make_refuse_node,
+    make_respond_node,
+    make_respond_with_caveat_node,
     make_route_node,
     make_router,
     make_tool_node,
@@ -28,7 +34,12 @@ from finance_qna.agent.state import AgentState
 from finance_qna.tools.registry import build_tools
 
 
-def build_graph(engine: Engine, llm: BaseChatModel, max_tool_steps: int = 6) -> Any:
+def build_graph(
+    engine: Engine,
+    llm: BaseChatModel,
+    max_tool_steps: int = 6,
+    groundedness_retry_limit: int = 1,
+) -> Any:
     """Compile the agent graph, wired to `engine`'s data and `llm` for reasoning."""
     tools = build_tools(engine)
 
@@ -39,6 +50,9 @@ def build_graph(engine: Engine, llm: BaseChatModel, max_tool_steps: int = 6) -> 
     graph.add_node("act", make_act_node(llm, tools))
     graph.add_node("tool_node", make_tool_node(tools))
     graph.add_node("draft_answer", make_draft_answer_node(llm))
+    graph.add_node("ground_check", make_ground_check_node())
+    graph.add_node("respond", make_respond_node())
+    graph.add_node("respond_with_caveat", make_respond_with_caveat_node())
 
     graph.add_edge(START, "route")
     graph.add_conditional_edges(
@@ -54,6 +68,13 @@ def build_graph(engine: Engine, llm: BaseChatModel, max_tool_steps: int = 6) -> 
         {"tool_node": "tool_node", "draft_answer": "draft_answer"},
     )
     graph.add_edge("tool_node", "act")
-    graph.add_edge("draft_answer", END)
+    graph.add_edge("draft_answer", "ground_check")
+    graph.add_conditional_edges(
+        "ground_check",
+        make_ground_router(groundedness_retry_limit),
+        {"respond": "respond", "act": "act", "respond_with_caveat": "respond_with_caveat"},
+    )
+    graph.add_edge("respond", END)
+    graph.add_edge("respond_with_caveat", END)
 
     return graph.compile()

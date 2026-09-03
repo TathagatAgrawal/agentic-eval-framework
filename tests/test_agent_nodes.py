@@ -15,6 +15,8 @@ from finance_qna.agent.nodes import (
     make_act_node,
     make_clarify_node,
     make_draft_answer_node,
+    make_ground_check_node,
+    make_ground_router,
     make_refuse_node,
     make_route_node,
     make_router,
@@ -229,3 +231,77 @@ def test_clarify_node_handles_block_style_content() -> None:
     update = clarify(state)
 
     assert update["draft_answer"].text == "Which month?"
+
+
+def _grounded_state() -> AgentState:
+    """Build a state with a draft answer whose sole claim matches its ledger entry."""
+    state = initial_state("How much did I spend on dining?")
+    state["ledger"] = [
+        {
+            "ledger_id": "L1",
+            "tool_name": "aggregate_spending_tool",
+            "args": {},
+            "result": {"total": "415.77", "count": 8},
+            "timestamp": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    state["draft_answer"] = StructuredAnswer(
+        text="You spent $415.77.", claims=[Claim(value=Decimal("415.77"), ledger_id="L1")]
+    )
+    return state
+
+
+def test_ground_check_node_accepts_a_grounded_answer() -> None:
+    """A draft answer whose claims match the ledger must pass with no retry noted."""
+    ground_check = make_ground_check_node()
+    state = _grounded_state()
+
+    update = ground_check(state)
+
+    assert update["groundedness_ok"] is True
+    assert "retry_count" not in update
+
+
+def test_ground_check_node_flags_an_ungrounded_answer_and_notes_it() -> None:
+    """An unsupported claim must fail the check, bump retry_count, and append a
+    corrective note to the message history for the next act call."""
+    ground_check = make_ground_check_node()
+    state = _grounded_state()
+    state["draft_answer"] = StructuredAnswer(
+        text="You spent $999999.99.", claims=[Claim(value=Decimal("999999.99"), ledger_id="L1")]
+    )
+
+    update = ground_check(state)
+
+    assert update["groundedness_ok"] is False
+    assert update["retry_count"] == 1
+    assert "999999.99" in update["messages"][-1].content
+
+
+def test_ground_router_accepts_when_groundedness_ok() -> None:
+    """The ground router must send a passing answer straight to respond."""
+    router = make_ground_router(retry_limit=1)
+    state = _grounded_state()
+    state["groundedness_ok"] = True
+
+    assert router(state) == "respond"
+
+
+def test_ground_router_retries_when_within_limit() -> None:
+    """The ground router must send a failing answer back to act while retries remain."""
+    router = make_ground_router(retry_limit=1)
+    state = _grounded_state()
+    state["groundedness_ok"] = False
+    state["retry_count"] = 1
+
+    assert router(state) == "act"
+
+
+def test_ground_router_falls_back_to_caveat_once_retries_are_exhausted() -> None:
+    """The ground router must fall back to a caveat once retries run out."""
+    router = make_ground_router(retry_limit=1)
+    state = _grounded_state()
+    state["groundedness_ok"] = False
+    state["retry_count"] = 2
+
+    assert router(state) == "respond_with_caveat"

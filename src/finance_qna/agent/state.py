@@ -1,9 +1,10 @@
 """The LangGraph state schema for the agent's turn loop.
 
-This is the routing-and-ReAct-slice version of the state: it adds `route` and
-`route_reason` on top of the minimal ReAct slice, so a turn can be classified as
-answer/clarify/refuse before any tool is called. Groundedness and cross-turn
-memory fields are added in the next slice per the LLD's incremental build plan.
+This slice adds `groundedness_ok`, `retry_count`, and `final_answer` on top of
+the routing-and-ReAct slice, so a draft answer is verified against the ledger
+before it's shown to the user, with a bounded retry before falling back to a
+caveated response. Cross-turn memory fields are added in the next slice per the
+LLD's incremental build plan.
 """
 
 from typing import Any, Literal, TypedDict
@@ -34,6 +35,9 @@ class AgentState(TypedDict):
     draft_answer: StructuredAnswer | None
     route: Literal["answer", "clarify", "refuse"] | None
     route_reason: str | None
+    groundedness_ok: bool
+    retry_count: int
+    final_answer: str | None
 
 
 def initial_state(question: str) -> AgentState:
@@ -45,4 +49,7 @@ def initial_state(question: str) -> AgentState:
         draft_answer=None,
         route=None,
         route_reason=None,
+        groundedness_ok=False,
+        retry_count=0,
+        final_answer=None,
     )
