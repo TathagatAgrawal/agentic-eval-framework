@@ -42,6 +42,11 @@ extend-exclude = ["design"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# Typer's idiomatic parameter style requires calling typer.Option()/typer.Argument()
+# in argument defaults; that's the documented usage, not a real mutable-default bug.
+"src/finance_qna/cli/*.py" = ["B008"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true

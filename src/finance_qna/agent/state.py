@@ -28,7 +28,7 @@ class LedgerEntry(TypedDict):
     ledger_id: str
     tool_name: str
     args: dict[str, Any]
-    result: dict[str, Any]
+    result: Any  # a tool's serialized result: a dict, or a list for grouped/multi-row tools
     timestamp: str
 
 
