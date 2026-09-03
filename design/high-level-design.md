@@ -98,7 +98,7 @@ Built after the agent, against its trace output (subsystem 7) so it never needs 
 | Concern | Choice | Rationale |
 |---|---|---|
 | Language | Python 3.11+ | project requirement |
-| LLM | Google Gemini (e.g. `gemini-2.5-flash` / `gemini-2.5-pro`) | project requirement |
+| LLM | Google Gemini (e.g. `gemini-flash-latest` / `gemini-pro-latest`) | project requirement |
 | LLM orchestration | LangChain (`langchain-google-genai`) + LangGraph | project requirement; LangGraph gives explicit, inspectable state-machine control over the ReAct/groundedness loop instead of a custom orchestrator |
 | Structured I/O | Pydantic v2 | tool argument/result schemas, structured LLM output (`with_structured_output`) |
 | Data store | SQLite | zero-ops, trivially portable, sufficient for a single synthetic dataset; queried only through the tool layer, never directly by the LLM |
