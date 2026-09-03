@@ -1,4 +1,4 @@
-"""LangGraph node functions for the agent's turn loop (minimal ReAct slice).
+"""LangGraph node functions for the agent's turn loop (routing + ReAct slice).
 
 Each `make_*_node` factory closes over its dependencies (the LLM, the tool list,
 the step limit) and returns a plain `state -> partial state` function, so the
@@ -16,7 +16,13 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ValidationError
 
 from finance_qna.agent.answer import StructuredAnswer
-from finance_qna.agent.prompts import DRAFT_ANSWER_INSTRUCTIONS
+from finance_qna.agent.prompts import (
+    CLARIFY_INSTRUCTIONS,
+    DRAFT_ANSWER_INSTRUCTIONS,
+    REFUSE_INSTRUCTIONS,
+    ROUTE_INSTRUCTIONS,
+)
+from finance_qna.agent.route import RouteDecision
 from finance_qna.agent.state import AgentState, LedgerEntry
 from finance_qna.tools.errors import CategoryNotFoundError
 
@@ -31,6 +37,24 @@ def serialize_tool_result(result: Any) -> Any:
             item.model_dump(mode="json") if isinstance(item, BaseModel) else item for item in result
         ]
     return result
+
+
+def extract_text(content: Any) -> str:
+    """Extract plain text from an AIMessage's `content`.
+
+    Some providers (including the current Gemini integration) return `content`
+    as a list of content blocks (e.g. `[{"type": "text", "text": "..."}]`)
+    rather than a plain string, so this normalizes either shape to text.
+    """
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text", "")))
+    return "".join(parts)
 
 
 def make_act_node(llm: BaseChatModel, tools: list[BaseTool]) -> Any:
@@ -128,3 +152,52 @@ def make_draft_answer_node(llm: BaseChatModel) -> Any:
         return {"draft_answer": result}
 
     return draft_answer
+
+
+def make_route_node(llm: BaseChatModel) -> Any:
+    """Build the `route` node: classifies the question as answer/clarify/refuse
+    before any tool is called."""
+    structured_llm = llm.with_structured_output(RouteDecision)
+
+    def route(state: AgentState) -> dict[str, Any]:
+        """Classify `state['question']` and record the route and its reason."""
+        prompt = ROUTE_INSTRUCTIONS.format(question=state["question"])
+        decision = structured_llm.invoke([HumanMessage(content=prompt)])
+        assert isinstance(decision, RouteDecision)
+        return {"route": decision.route, "route_reason": decision.reason}
+
+    return route
+
+
+def route_edge(state: AgentState) -> Literal["answer", "clarify", "refuse"]:
+    """Conditional-edge function: send the graph down the branch `route` chose."""
+    assert state["route"] is not None
+    return state["route"]
+
+
+def make_clarify_node(llm: BaseChatModel) -> Any:
+    """Build the `clarify` node: asks a short clarifying question instead of guessing."""
+
+    def clarify(state: AgentState) -> dict[str, Any]:
+        """Generate a clarifying question and store it as the turn's answer."""
+        prompt = CLARIFY_INSTRUCTIONS.format(
+            question=state["question"], reason=state["route_reason"] or ""
+        )
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return {"draft_answer": StructuredAnswer(text=extract_text(response.content), claims=[])}
+
+    return clarify
+
+
+def make_refuse_node(llm: BaseChatModel) -> Any:
+    """Build the `refuse` node: politely declines an out-of-scope question."""
+
+    def refuse(state: AgentState) -> dict[str, Any]:
+        """Generate a decline message and store it as the turn's answer."""
+        prompt = REFUSE_INSTRUCTIONS.format(
+            question=state["question"], reason=state["route_reason"] or ""
+        )
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return {"draft_answer": StructuredAnswer(text=extract_text(response.content), claims=[])}
+
+    return refuse

@@ -21,6 +21,40 @@ error if it comes back unknown.
 - Once you have enough information to answer, stop calling tools.
 """
 
+ROUTE_INSTRUCTIONS = """\
+Classify the user's question about their personal financial transaction data.
+
+- "answer": the question can be answered using tools over spending, transactions, \
+categories, comparisons, or trends, and any time period or category it refers to \
+is unambiguous.
+- "clarify": the question is genuinely ambiguous -- e.g. an unclear time period \
+with no established reference, or a follow-up reference to something not yet \
+established in this conversation -- and guessing would risk an inaccurate answer.
+- "refuse": the question is not about the user's own transaction data at all \
+(e.g. general financial advice, investment recommendations, or unrelated chit-chat).
+
+Question: {question}
+"""
+
+CLARIFY_INSTRUCTIONS = """\
+The user's question is ambiguous: {reason}
+
+Write a short, direct clarifying question so you can answer accurately once they \
+respond. Do not guess at an answer.
+
+Question: {question}
+"""
+
+REFUSE_INSTRUCTIONS = """\
+The user's question is out of scope for this assistant: {reason}
+
+Write a short, polite response declining to answer. Briefly note that you can \
+only answer questions about their own transaction data (spending, categories, \
+trends, and comparisons).
+
+Question: {question}
+"""
+
 DRAFT_ANSWER_INSTRUCTIONS = """\
 Using ONLY the tool results below (the "ledger"), write a final answer to the \
 user's question.

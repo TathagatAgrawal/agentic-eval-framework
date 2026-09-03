@@ -1,71 +1,62 @@
-"""Fake LLM test doubles so agent-graph tests never call the real Gemini API.
+"""A fake LLM test double so agent-graph tests never call the real Gemini API.
 
-Each fake implements just enough of the `BaseChatModel` surface (`bind_tools`,
+Implements just enough of the `BaseChatModel` surface (`bind_tools`,
 `with_structured_output`, `invoke`) for the node factories in `agent/nodes.py`
-to work against it, returning pre-scripted responses in order.
+to work against it, returning pre-scripted responses in order. A single class
+covers every node because the same `llm` instance is bound differently by
+different nodes (tool-calling for `act`, structured output for `route` and
+`draft_answer`, plain `invoke` for `clarify`/`refuse`).
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
 
 
-class FakeToolCallingLLM:
-    """A stand-in for the agent LLM: returns a fixed sequence of AIMessages."""
+class FakeLLM:
+    """Serves scripted responses to each of the three ways a node can call an LLM."""
 
-    def __init__(self, responses: Sequence[AIMessage]) -> None:
-        """Store the scripted responses to hand back on successive `invoke` calls."""
-        self._responses = iter(responses)
+    def __init__(
+        self,
+        *,
+        tool_call_responses: Sequence[AIMessage] = (),
+        invoke_responses: Sequence[AIMessage] = (),
+        structured_responses: dict[str, Sequence[BaseModel]] | None = None,
+    ) -> None:
+        """Store scripted responses per call style, keyed by schema name for
+        structured-output calls (since one fake serves every node's schema)."""
+        self._tool_call_responses: Iterator[AIMessage] = iter(tool_call_responses)
+        self._invoke_responses: Iterator[AIMessage] = iter(invoke_responses)
+        self._structured_responses: dict[str, Iterator[BaseModel]] = {
+            name: iter(responses) for name, responses in (structured_responses or {}).items()
+        }
 
-    def bind_tools(self, tools: Any) -> "FakeToolCallingLLM":
-        """Ignore the tool list (the fake doesn't call a real model) and return self."""
-        return self
+    def bind_tools(self, tools: Any) -> "_BoundToolLLM":
+        """Return a view that serves scripted AIMessages for the act node's tool loop."""
+        return _BoundToolLLM(self._tool_call_responses)
 
     def invoke(self, messages: list[BaseMessage]) -> AIMessage:
-        """Return the next scripted AIMessage, regardless of the input messages."""
-        return next(self._responses)
+        """Return the next scripted plain-text AIMessage (used by clarify/refuse)."""
+        return next(self._invoke_responses)
+
+    def with_structured_output(self, schema: type[BaseModel]) -> "_StructuredLLM":
+        """Return a view that serves the scripted response for this schema type.
+
+        Binding happens at graph-construction time for every node regardless of
+        which branch a test actually exercises, so a schema with no scripted
+        responses is left as an empty iterator rather than raising here -- it
+        only raises (via StopIteration) if a test's graph run actually reaches
+        a node that tries to invoke it.
+        """
+        return _StructuredLLM(self._structured_responses.get(schema.__name__, iter(())))
 
 
-class FakeStructuredLLM:
-    """A stand-in for the draft_answer LLM: returns a fixed structured-output value."""
+class _BoundToolLLM:
+    """The `bind_tools(...)` result: serves the act node's scripted AIMessages."""
 
-    def __init__(self, answer: BaseModel) -> None:
-        """Store the scripted answer to hand back on `invoke`."""
-        self._answer = answer
-
-    def with_structured_output(self, schema: Any) -> "FakeStructuredLLM":
-        """Ignore the requested schema (the fake always returns its scripted answer)."""
-        return self
-
-    def invoke(self, messages: list[BaseMessage]) -> BaseModel:
-        """Return the scripted structured answer, regardless of the input messages."""
-        return self._answer
-
-
-class FakeAgentLLM:
-    """Combines `FakeToolCallingLLM` and `FakeStructuredLLM` so one fake can stand in
-    for the single `llm` the full graph binds tools on and gets structured output from."""
-
-    def __init__(self, tool_call_responses: Sequence[AIMessage], final_answer: BaseModel) -> None:
-        """Store the scripted act-node responses and the scripted final structured answer."""
-        self._tool_call_responses = iter(tool_call_responses)
-        self._final_answer = final_answer
-
-    def bind_tools(self, tools: Any) -> "_BoundFakeAgentLLM":
-        """Return a view of this fake that serves scripted AIMessages on `invoke`."""
-        return _BoundFakeAgentLLM(self._tool_call_responses)
-
-    def with_structured_output(self, schema: Any) -> "_StructuredFakeAgentLLM":
-        """Return a view of this fake that serves the scripted final answer on `invoke`."""
-        return _StructuredFakeAgentLLM(self._final_answer)
-
-
-class _BoundFakeAgentLLM:
-    """The `bind_tools(...)` result for `FakeAgentLLM`."""
-
-    def __init__(self, responses: Any) -> None:
+    def __init__(self, responses: Iterator[AIMessage]) -> None:
         """Store the shared iterator of scripted AIMessages."""
         self._responses = responses
 
@@ -74,13 +65,13 @@ class _BoundFakeAgentLLM:
         return next(self._responses)
 
 
-class _StructuredFakeAgentLLM:
-    """The `with_structured_output(...)` result for `FakeAgentLLM`."""
+class _StructuredLLM:
+    """The `with_structured_output(...)` result for one schema type."""
 
-    def __init__(self, answer: BaseModel) -> None:
-        """Store the scripted final answer."""
-        self._answer = answer
+    def __init__(self, responses: Iterator[BaseModel]) -> None:
+        """Store the shared iterator of scripted structured responses."""
+        self._responses = responses
 
     def invoke(self, messages: list[BaseMessage]) -> BaseModel:
-        """Return the scripted final answer."""
-        return self._answer
+        """Return the next scripted structured response."""
+        return next(self._responses)

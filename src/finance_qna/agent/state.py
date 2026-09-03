@@ -1,12 +1,12 @@
 """The LangGraph state schema for the agent's turn loop.
 
-This is the minimal-ReAct-slice version of the state: just enough to run the
-act/tool_node/draft_answer loop for a single-turn question. Routing, groundedness,
-and cross-turn memory fields are added in later slices per the LLD's incremental
-build plan.
+This is the routing-and-ReAct-slice version of the state: it adds `route` and
+`route_reason` on top of the minimal ReAct slice, so a turn can be classified as
+answer/clarify/refuse before any tool is called. Groundedness and cross-turn
+memory fields are added in the next slice per the LLD's incremental build plan.
 """
 
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
@@ -32,6 +32,8 @@ class AgentState(TypedDict):
     messages: list[BaseMessage]
     ledger: list[LedgerEntry]
     draft_answer: StructuredAnswer | None
+    route: Literal["answer", "clarify", "refuse"] | None
+    route_reason: str | None
 
 
 def initial_state(question: str) -> AgentState:
@@ -41,4 +43,6 @@ def initial_state(question: str) -> AgentState:
         messages=[SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=question)],
         ledger=[],
         draft_answer=None,
+        route=None,
+        route_reason=None,
     )

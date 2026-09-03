@@ -1,8 +1,9 @@
 """End-to-end tests of the compiled agent graph, with the LLM fully mocked.
 
-These verify the graph wiring itself (act -> tool_node -> act -> draft_answer,
-and the max_tool_steps loop guard) without spending any real Gemini quota. Tool
-execution against the fixture database is real.
+These verify the graph wiring itself -- route -> act -> tool_node -> act ->
+draft_answer, the max_tool_steps loop guard, and the clarify/refuse short-circuit
+paths -- without spending any real Gemini quota. Tool execution against the
+fixture database is real.
 """
 
 from decimal import Decimal
@@ -12,8 +13,9 @@ from sqlalchemy import Engine
 
 from finance_qna.agent.answer import Claim, StructuredAnswer
 from finance_qna.agent.graph import build_graph
+from finance_qna.agent.route import RouteDecision
 from finance_qna.agent.state import initial_state
-from tests.fakes import FakeAgentLLM
+from tests.fakes import FakeLLM
 
 
 def _tool_call(call_id: str) -> dict:
@@ -32,22 +34,27 @@ def _tool_call(call_id: str) -> dict:
 
 
 def test_graph_calls_one_tool_then_drafts_answer(fixture_engine: Engine) -> None:
-    """The graph must run act -> tool_node -> act -> draft_answer for a simple question."""
+    """The graph must run route -> act -> tool_node -> act -> draft_answer for a
+    simple, unambiguous, in-scope question."""
     scripted_answer = StructuredAnswer(
         text="You spent $415.77 on dining in July 2024.",
         claims=[Claim(value=Decimal("415.77"), ledger_id="L1")],
     )
-    fake_llm = FakeAgentLLM(
+    fake_llm = FakeLLM(
+        structured_responses={
+            "RouteDecision": [RouteDecision(route="answer", reason="unambiguous")],
+            "StructuredAnswer": [scripted_answer],
+        },
         tool_call_responses=[
             AIMessage(content="", tool_calls=[_tool_call("call_1")]),
             AIMessage(content="I have enough information now."),
         ],
-        final_answer=scripted_answer,
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
     result = graph.invoke(initial_state("How much did I spend on dining in July 2024?"))
 
+    assert result["route"] == "answer"
     assert len(result["ledger"]) == 1
     assert result["ledger"][0]["tool_name"] == "aggregate_spending_tool"
     assert result["draft_answer"] is scripted_answer
@@ -61,11 +68,14 @@ def test_graph_stops_at_max_tool_steps_even_if_model_keeps_requesting_tools(
     scripted_answer = StructuredAnswer(text="Here's what I found so far.", claims=[])
     # Script more tool-call responses than max_tool_steps allows; the router should
     # never let act run enough times to exhaust this list.
-    fake_llm = FakeAgentLLM(
+    fake_llm = FakeLLM(
+        structured_responses={
+            "RouteDecision": [RouteDecision(route="answer", reason="unambiguous")],
+            "StructuredAnswer": [scripted_answer],
+        },
         tool_call_responses=[
             AIMessage(content="", tool_calls=[_tool_call(f"call_{i}")]) for i in range(10)
         ],
-        final_answer=scripted_answer,
     )
 
     graph = build_graph(fixture_engine, fake_llm, max_tool_steps=2)
@@ -73,3 +83,41 @@ def test_graph_stops_at_max_tool_steps_even_if_model_keeps_requesting_tools(
 
     assert len(result["ledger"]) == 2
     assert result["draft_answer"] is scripted_answer
+
+
+def test_graph_clarify_path_never_calls_any_tool(fixture_engine: Engine) -> None:
+    """When route chooses "clarify", the graph must go straight to a clarifying
+    question with zero tool calls and an empty ledger."""
+    fake_llm = FakeLLM(
+        structured_responses={
+            "RouteDecision": [RouteDecision(route="clarify", reason="ambiguous time period")],
+        },
+        invoke_responses=[AIMessage(content="Which month did you mean?")],
+    )
+
+    graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
+    result = graph.invoke(initial_state("How much did I spend this month?"))
+
+    assert result["route"] == "clarify"
+    assert result["ledger"] == []
+    assert result["draft_answer"].text == "Which month did you mean?"
+    assert result["draft_answer"].claims == []
+
+
+def test_graph_refuse_path_never_calls_any_tool(fixture_engine: Engine) -> None:
+    """When route chooses "refuse", the graph must go straight to a decline
+    message with zero tool calls and an empty ledger."""
+    fake_llm = FakeLLM(
+        structured_responses={
+            "RouteDecision": [RouteDecision(route="refuse", reason="not about the data")],
+        },
+        invoke_responses=[AIMessage(content="I can only answer questions about your spending.")],
+    )
+
+    graph = build_graph(fixture_engine, fake_llm, max_tool_steps=6)
+    result = graph.invoke(initial_state("Should I invest in index funds?"))
+
+    assert result["route"] == "refuse"
+    assert result["ledger"] == []
+    assert result["draft_answer"].text == "I can only answer questions about your spending."
+    assert result["draft_answer"].claims == []
