@@ -108,7 +108,6 @@ def eval_run(
     _ensure_eval_importable()
     from eval.runner import run_eval
     from eval.schema import load_test_cases
-    from eval.store import save_run
 
     repo_root = _repo_root()
     testset_dir = repo_root / "eval" / "testset"
@@ -128,10 +127,15 @@ def eval_run(
 
     run_id = uuid.uuid4().hex[:8]
     run_dir = repo_root / "runs" / f"eval-{run_id}"
-    record = run_eval(adapter, cases, run_dir, label=label, run_id=run_id)
-    save_run(record, runs_dir=repo_root / "eval" / "runs")
+    eval_runs_dir = repo_root / "eval" / "runs"
+    record = run_eval(adapter, cases, run_dir, label=label, run_id=run_id, runs_dir=eval_runs_dir)
 
     typer.echo(f"Run {record.run_id} ({len(record.results)} cases, agent={record.agent_id}):")
+    errored = [r for r in record.results if r.error]
+    if errored:
+        typer.echo(f"  {len(errored)} case(s) did not complete:")
+        for r in errored:
+            typer.echo(f"    - {r.case_id}: {r.error}")
     for metric, rate in sorted(record.summary.items()):
         typer.echo(f"  {metric}: {rate:.0%}")
 

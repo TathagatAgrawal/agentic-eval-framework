@@ -25,6 +25,7 @@ from eval.scorers import (
 )
 from eval.scorers.efficiency import EfficiencyResult
 from eval.scorers.types import ScoreResult
+from eval.store import save_run
 from finance_qna.agent.adapter import AgentAdapter
 from finance_qna.tracing.trace import RunTrace, write_trace
 
@@ -82,15 +83,28 @@ def _aggregate_scores(per_turn_metrics: list[dict[str, ScoreResult]]) -> dict[st
 
 
 def run_test_case(adapter: AgentAdapter, case: TestCase, run_dir: Path) -> TestCaseResult:
-    """Run one test case (single-turn or multi-turn) against `adapter` and score it."""
+    """Run one test case (single-turn or multi-turn) against `adapter` and score it.
+
+    If a turn raises (e.g. a 429 from the model provider), the case stops there
+    -- later turns can't run anyway, since they'd need this one's trace as
+    `prior_turns` -- but every turn that *did* complete is still scored and
+    returned, with `error` set to what stopped it, rather than losing that
+    turn's work.
+    """
     case_trace_dir = run_dir / case.id
     prior_turns: list[RunTrace] = []
     per_turn_metrics: list[dict[str, ScoreResult]] = []
     per_turn_efficiency: list[EfficiencyResult] = []
     trace_refs: list[str] = []
+    error: str | None = None
 
     for turn in _turns_for(case):
-        trace = adapter.run_turn(turn.question, prior_turns=prior_turns)
+        try:
+            trace = adapter.run_turn(turn.question, prior_turns=prior_turns)
+        except Exception as exc:  # deliberately broad: isolate this case's failure from the rest
+            error = f"{type(exc).__name__}: {exc}"
+            break
+
         trace_path = write_trace(trace, case_trace_dir)
         trace_refs.append(str(trace_path))
 
@@ -104,11 +118,18 @@ def run_test_case(adapter: AgentAdapter, case: TestCase, run_dir: Path) -> TestC
         case_id=case.id,
         category=case.category,
         scores=_aggregate_scores(per_turn_metrics),
-        optimal_tool_calls=_sum_or_none(e.optimal_tool_calls for e in per_turn_efficiency),
+        optimal_tool_calls=(
+            _sum_or_none(e.optimal_tool_calls for e in per_turn_efficiency)
+            if per_turn_efficiency
+            else None
+        ),
         actual_tool_calls=sum(e.actual_tool_calls for e in per_turn_efficiency),
-        overage=_sum_or_none(e.overage for e in per_turn_efficiency),
+        overage=(
+            _sum_or_none(e.overage for e in per_turn_efficiency) if per_turn_efficiency else None
+        ),
         retries=sum(e.retries for e in per_turn_efficiency),
         trace_refs=trace_refs,
+        error=error,
     )
 
 
@@ -140,25 +161,70 @@ def _summarize(results: list[TestCaseResult]) -> dict[str, float]:
     return summary
 
 
+def _errored_result(case: TestCase, exc: Exception) -> TestCaseResult:
+    """Build a placeholder TestCaseResult for a case that failed before
+    run_test_case could return one at all (belt-and-braces on top of
+    run_test_case's own per-turn error handling)."""
+    return TestCaseResult(
+        case_id=case.id,
+        category=case.category,
+        scores={},
+        optimal_tool_calls=None,
+        actual_tool_calls=0,
+        overage=None,
+        retries=0,
+        trace_refs=[],
+        error=f"{type(exc).__name__}: {exc}",
+    )
+
+
 def run_eval(
     adapter: AgentAdapter,
     cases: list[TestCase],
     run_dir: Path,
     label: str = "",
     run_id: str | None = None,
+    runs_dir: Path | None = None,
 ) -> RunRecord:
     """Run every test case against `adapter`, scoring each, and aggregate a `RunRecord`.
 
     `run_id` defaults to a fresh random id; callers that need to know the id
     before traces are written (e.g. to name `run_dir` after it) can generate
     one themselves and pass it in.
+
+    If `runs_dir` is given, the `RunRecord` is saved after *every* case, not
+    just once at the end -- a case that raises (a 429, or anything else) never
+    loses the cases that already completed, and the saved summary always
+    reflects whatever's actually on disk. `run_test_case` already isolates a
+    failure to a single turn/case internally; this is the second, outer layer
+    of that same guarantee, for anything that escapes it.
     """
-    results = [run_test_case(adapter, case, run_dir) for case in cases]
-    return RunRecord(
-        run_id=run_id or uuid.uuid4().hex[:8],
+    resolved_run_id = run_id or uuid.uuid4().hex[:8]
+    results: list[TestCaseResult] = []
+    record = RunRecord(
+        run_id=resolved_run_id,
         timestamp=datetime.now(UTC),
         agent_id=adapter.id,
         label=label,
         results=results,
-        summary=_summarize(results),
+        summary={},
     )
+
+    for case in cases:
+        try:
+            result = run_test_case(adapter, case, run_dir)
+        except Exception as exc:
+            result = _errored_result(case, exc)
+        results.append(result)
+
+        record = record.model_copy(
+            update={
+                "timestamp": datetime.now(UTC),
+                "results": list(results),
+                "summary": _summarize(results),
+            }
+        )
+        if runs_dir is not None:
+            save_run(record, runs_dir=runs_dir)
+
+    return record

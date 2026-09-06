@@ -191,6 +191,15 @@ graph TD
 
 For a multi-turn sequence, the runner accumulates the `RunTrace` list for the sequence so far and passes it as `prior_turns` on each subsequent call — the adapter decides what to do with that history.
 
+### Resilience to mid-run failures (e.g. a 429)
+
+A live run against a real model can hit a rate limit or transient error partway through, and losing every case that already completed would be a real cost given each run spends real quota. Two layers handle this:
+
+- **`run_test_case` isolates failure to a single turn.** If `adapter.run_turn` raises partway through a multi-turn sequence, the turns that already completed are still scored and kept (`trace_refs`, `scores`, tool-call counts all reflect just the completed subset); the case's `error` field records what stopped it, rather than the exception propagating and losing that work.
+- **`run_eval` checkpoints after every case, not just at the end.** When called with `runs_dir` (as the CLI does), it saves the `RunRecord` — summary included — after each case finishes, so the file on disk always reflects real progress. A case-level exception that somehow escapes `run_test_case` is caught here too (`_errored_result`) and recorded the same way, and the loop continues to the next case rather than aborting the whole run. `finance-qna eval run`'s own errored cases are printed by id + reason after the run.
+
+The pass-rate math in `_summarize` doesn't need special-casing for this: an errored case has an empty `scores` dict, so it contributes to no metric's denominator — exactly like any other "not applicable" result.
+
 ### Runner pseudocode
 
 ```python

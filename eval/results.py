@@ -26,6 +26,7 @@ class TestCaseResult(BaseModel):
     overage: int | None
     retries: int
     trace_refs: list[str]
+    error: str | None = None  # set if the case (or a turn within it) raised, e.g. a 429
 
 
 class RunRecord(BaseModel):

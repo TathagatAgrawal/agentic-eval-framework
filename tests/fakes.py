@@ -86,15 +86,23 @@ class _StructuredLLM:
 
 class FakeAdapter:
     """A scripted `AgentAdapter`: returns pre-built `RunTrace`s in order,
-    regardless of the question or `prior_turns` passed in."""
+    regardless of the question or `prior_turns` passed in.
 
-    def __init__(self, id: str, responses: Sequence[RunTrace]) -> None:
-        """Store the adapter id and the scripted RunTraces to return in order."""
+    A scripted item may also be an `Exception` instance, in which case
+    `run_turn` raises it instead of returning it -- for testing how callers
+    (the eval runner) handle a call failing partway through, e.g. a 429.
+    """
+
+    def __init__(self, id: str, responses: Sequence[RunTrace | Exception]) -> None:
+        """Store the adapter id and the scripted RunTraces/exceptions to return in order."""
         self.id = id
-        self._responses: Iterator[RunTrace] = iter(responses)
+        self._responses: Iterator[RunTrace | Exception] = iter(responses)
         self.calls: list[tuple[str, list[RunTrace]]] = []
 
     def run_turn(self, question: str, prior_turns: list[RunTrace]) -> RunTrace:
-        """Record the call and return the next scripted RunTrace."""
+        """Record the call and return (or raise) the next scripted response."""
         self.calls.append((question, list(prior_turns)))
-        return next(self._responses)
+        response = next(self._responses)
+        if isinstance(response, Exception):
+            raise response
+        return response

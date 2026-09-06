@@ -3,6 +3,7 @@ graph, no LLM, per design/eval-harness-plan.md's build-order note that the
 runner should be testable against a fake AgentAdapter.
 """
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -202,3 +203,135 @@ def test_run_eval_aggregates_a_run_record_with_summary(tmp_path: Path) -> None:
     assert len(record.results) == 2
     assert record.summary["overall.numeric_correctness"] == 0.5
     assert record.summary["simple_lookup.numeric_correctness"] == 0.5
+
+
+def test_run_test_case_records_an_error_instead_of_raising(tmp_path: Path) -> None:
+    """A turn that raises (e.g. a 429) must produce an errored TestCaseResult,
+    not propagate the exception."""
+    adapter = FakeAdapter(id="fake-1", responses=[RuntimeError("429 rate limited")])
+    case = TestCase(
+        id="simple_001",
+        category="simple_lookup",
+        question="Q1",
+        expected=ExpectedResult(behavior="answer", value=1.0, optimal_tool_calls=1),
+    )
+
+    result = run_test_case(adapter, case, tmp_path)
+
+    assert result.error == "RuntimeError: 429 rate limited"
+    assert result.scores == {}
+    assert result.optimal_tool_calls is None
+    assert result.trace_refs == []
+
+
+def test_run_test_case_multi_turn_keeps_completed_turns_after_a_later_failure(
+    tmp_path: Path,
+) -> None:
+    """If turn 2 of a sequence raises, turn 1's completed work must still be scored
+    and returned, not discarded."""
+    trace_1 = _trace(
+        turn_id="1",
+        claims=[Claim(value=Decimal("1.0"), ledger_id="L1")],
+        ledger=[_ledger_entry("L1")],
+    )
+    adapter = FakeAdapter(id="fake-1", responses=[trace_1, RuntimeError("429 rate limited")])
+    case = TestCase(
+        id="multi_001",
+        category="multi_turn",
+        turns=[
+            Turn(
+                question="Q1", expected=ExpectedResult(behavior="answer", value=1.0, tolerance=0.01)
+            ),
+            Turn(question="Q2", expected=ExpectedResult(behavior="answer", value=1.0)),
+        ],
+    )
+
+    result = run_test_case(adapter, case, tmp_path)
+
+    assert result.error == "RuntimeError: 429 rate limited"
+    assert len(result.trace_refs) == 1  # turn 1's trace was kept
+    assert result.scores["numeric_correctness"] is True  # scored from turn 1 alone
+    assert result.actual_tool_calls == 1
+
+
+def test_run_eval_continues_past_a_failed_case_and_checkpoints_progress(tmp_path: Path) -> None:
+    """One case failing must not stop the run, and every case (including the
+    failure) must already be saved to disk by the time run_eval returns."""
+    passing_trace = _trace(claims=[], ledger=[])
+    adapter = FakeAdapter(
+        id="fake-1",
+        responses=[passing_trace, RuntimeError("429 rate limited"), passing_trace],
+    )
+    cases = [
+        TestCase(
+            id="case_1",
+            category="c",
+            question="Q1",
+            expected=ExpectedResult(behavior="answer", value=1.0),
+        ),
+        TestCase(
+            id="case_2",
+            category="c",
+            question="Q2",
+            expected=ExpectedResult(behavior="answer", value=1.0),
+        ),
+        TestCase(
+            id="case_3",
+            category="c",
+            question="Q3",
+            expected=ExpectedResult(behavior="answer", value=1.0),
+        ),
+    ]
+    runs_dir = tmp_path / "eval_runs"
+
+    record = run_eval(adapter, cases, tmp_path / "traces", run_id="run-xyz", runs_dir=runs_dir)
+
+    assert [r.case_id for r in record.results] == ["case_1", "case_2", "case_3"]
+    assert record.results[1].error == "RuntimeError: 429 rate limited"
+    assert len(adapter.calls) == 3  # case_3 still ran despite case_2 failing
+
+    saved = json.loads((runs_dir / "run-xyz.json").read_text())
+    assert len(saved["results"]) == 3
+    assert saved["results"][1]["error"] == "RuntimeError: 429 rate limited"
+
+
+def test_run_eval_saves_a_checkpoint_after_every_case(tmp_path: Path) -> None:
+    """The saved RunRecord must reflect progress after each case, not only at the end."""
+
+    class _RecordingAdapter(FakeAdapter):
+        """A FakeAdapter that snapshots the on-disk run record after each call."""
+
+        def __init__(self, id: str, responses: list, runs_dir: Path) -> None:
+            """Store the runs_dir to inspect and the usual scripted responses."""
+            super().__init__(id=id, responses=responses)
+            self._runs_dir = runs_dir
+            self.saved_case_counts: list[int] = []
+
+        def run_turn(self, question: str, prior_turns: list[RunTrace]) -> RunTrace:
+            """Record how many cases were saved to disk *before* this call runs."""
+            saved_files = list(self._runs_dir.glob("*.json"))
+            if saved_files:
+                saved = json.loads(saved_files[0].read_text())
+                self.saved_case_counts.append(len(saved["results"]))
+            else:
+                self.saved_case_counts.append(0)
+            return super().run_turn(question, prior_turns)
+
+    runs_dir = tmp_path / "eval_runs"
+    trace = _trace(claims=[], ledger=[])
+    adapter = _RecordingAdapter(id="fake-1", responses=[trace, trace, trace], runs_dir=runs_dir)
+    cases = [
+        TestCase(
+            id=f"case_{i}",
+            category="c",
+            question=f"Q{i}",
+            expected=ExpectedResult(behavior="answer", value=1.0),
+        )
+        for i in range(3)
+    ]
+
+    run_eval(adapter, cases, tmp_path / "traces", run_id="run-xyz", runs_dir=runs_dir)
+
+    # before case 1 runs: nothing saved yet; before case 2: case 1's result is
+    # already on disk; before case 3: cases 1-2 are on disk
+    assert adapter.saved_case_counts == [0, 1, 2]
