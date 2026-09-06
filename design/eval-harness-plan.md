@@ -41,7 +41,7 @@ Six metrics, one scorer function each, matching the project overview's list exac
 | Contextual correctness | In multi-turn sequences, did the agent resolve the right category/period/baseline? | `ledger[*].args` (what was actually queried) vs. expected filter |
 | Clarification handling | Does it ask when it should, not guess? | `route == "clarify"` vs. expected |
 | Refusal correctness | Does it decline out-of-scope questions? | `route == "refuse"` vs. expected |
-| Efficiency | How many steps did it take? | `len(ledger)` and `retries` (reported, not pass/fail) |
+| Efficiency | How many tool calls did it take, relative to the minimum actually needed? | `len(ledger)` vs. `expected.optimal_tool_calls` (ground truth), plus `retries` |
 
 A seventh, optional `llm_judge` scorer (answer fluency/tone) may be added later, but per the project overview's "rather than relying primarily on LLM-as-judge scoring," it never gates the headline pass rate — it's reported separately in the dashboard if present at all.
 
@@ -54,6 +54,8 @@ The harness does **not** re-implement claim verification from scratch. `agent/gr
 ### 4.1 Source of ground truth
 
 Every expected numeric value comes from `data/ground_truth.json`, produced by the same `generate(seed=42, ...)` run as the database under test (`src/finance_qna/data/generate.py`). Test cases reference categories/months/events that exist in that file — they are never hand-computed — so a label can't silently drift from the data it's meant to check. The two intentionally-injected anomalies already in the generator (`SUBSCRIPTION_CHANGE_*` and `SPIKE_*` constants) are the ground truth for every trend/anomaly test case.
+
+`expected.optimal_tool_calls` (§4.3) is different in kind: it's not derivable from `ground_truth.json` at all, since it's a property of what the *toolset* (§3 of the LLD, `tools/registry.py`) can express, not of the data. It's authored by manually working out the fewest tool calls that could answer the question with the current six tools — e.g. a single-category, single-month total is answerable in exactly one `aggregate_spending_tool` call (no `list_categories_tool` call is needed first if the category name in the question is already valid, which every non-adversarial test case's question is by construction); a same-period two-category comparison is one `aggregate_spending_tool` call with `group_by="category"` (not two separate calls, and not `compare_periods_tool`, which is for two *periods*). Whoever authors or updates a test case is expected to actually verify this number against the real tool signatures (or by running the case once and confirming a smaller ledger isn't achievable) rather than guess — an `optimal_tool_calls` that's wrong in the "too generous" direction would silently hide a real efficiency regression.
 
 ### 4.2 File layout
 
@@ -91,6 +93,7 @@ eval/
     value: 511.94          # from ground_truth.json monthly_category_totals.Groceries["2024-07-01"]
     tolerance: 0.01
     expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1   # one aggregate_spending_tool call; the category is already valid, no need to list_categories_tool first
 
 - id: comparison_001
   category: comparison
@@ -101,6 +104,7 @@ eval/
     values: [1325.97, 1613.01]
     tolerance: 0.01
     expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1   # one aggregate_spending_tool call with group_by="category", then compare the two totals client-side
 
 - id: trend_001
   category: trend
@@ -110,6 +114,7 @@ eval/
     value: 17.99            # SUBSCRIPTION_NEW_AMOUNT from ground_truth.json
     tolerance: 0.01
     expected_tools: [detect_subscription_changes_tool]
+    optimal_tool_calls: 1
 
 - id: ambiguous_001
   category: ambiguous
@@ -127,22 +132,26 @@ eval/
   category: multi_turn
   turns:
     - question: "How much did I spend on dining in Q1 2025?"
-      expected: {behavior: answer, value: 1325.97, tolerance: 0.01}
+      expected: {behavior: answer, value: 1325.97, tolerance: 0.01, optimal_tool_calls: 1}
     - question: "What about groceries?"
       expected:
         behavior: answer
         value: 1613.01
         tolerance: 0.01
         expected_context: {category: "Groceries", date_range: {start: "2025-01-01", end: "2025-03-31"}}
+        optimal_tool_calls: 1
     - question: "Is that more or less than dining?"
       expected:
         behavior: answer
         value: 1613.01
         tolerance: 0.01
         expected_context: {category: "Groceries"}
+        optimal_tool_calls: 1   # one grouped aggregate_spending_tool call (group_by="category") returns every category's Q1 2025 total, dining and groceries included
 ```
 
 `expected.behavior` is one of `answer` / `clarify` / `refuse`, matching `route` directly. `expected_context` (multi-turn only) is checked as a **partial match**: every key in `expected_context` must appear with the same value somewhere in the flattened `args` of at least one of that turn's ledger entries (flattening handles the nested `filt.category`/`filt.date_range.start` shape tool args actually have, without the scorer needing to know each tool's exact arg schema). This is what verifies scope carry-over and comparative-follow-up resolution actually happened, not just that *an* answer came back. `expected_tools`/`expected_context` are best-effort signals a ledger-based architecture can satisfy; an architecture with no ledger concept simply can't be scored on them (see §2's graceful-degradation note) and that shows up honestly in the dashboard as unscored rather than passing/failing by accident.
+
+`optimal_tool_calls` is per-turn, not per-sequence, and must be computed against what the *current* architecture can actually do, not an idealized agent — `agent/state.py`'s `ledger` resets at the start of every turn, and `groundedness.verify()` only checks claims against *this turn's* ledger, so a claim can never cite a prior turn's tool result even though the value was already fetched. That's why the third turn above is labeled `1`, not `0`: the dining total from turn 1 isn't citable this turn, so at least one fresh tool call is unavoidable given how grounding currently works. If that per-turn reset ever changes (e.g. citations become allowed against `prior_turns`), this label would need to change with it — `optimal_tool_calls` documents the current architecture's ceiling, not a permanent property of the question.
 
 ### 4.4 Test categories and target counts (v1)
 
@@ -206,7 +215,7 @@ Each scorer has the signature `score(trace: RunTrace, expected: ExpectedResult) 
 - **`contextual_correctness`** (multi-turn only): pass iff every key/value in `expected_context` is found in the flattened `args` of some ledger entry from that turn; reported as "not applicable" if `trace.ledger` is empty and the architecture has no equivalent concept.
 - **`clarification`**: pass iff (`expected.behavior == "clarify"`) `==` (`trace.route == "clarify"`) — checked both directions, so an unwanted clarification on an answerable question fails too.
 - **`refusal`**: same structure, for `route == "refuse"`.
-- **`efficiency`**: not pass/fail — records `len(trace.ledger)` and `trace.retries` per case, aggregated into a distribution (mean/p90) per category in the summary, so a regression that makes the agent take 6 tool calls instead of 2 is visible even if correctness holds.
+- **`efficiency`**: reports `actual_tool_calls = len(trace.ledger)` against `expected.optimal_tool_calls`, as both an `overage = actual - optimal` count (0 or negative-impossible-by-construction; a negative would mean the label was wrong and should fail CI on the test set itself, not the agent) and an `efficient: bool = actual_tool_calls <= optimal_tool_calls`. `efficient` rolls up into a pass rate like the other metrics (e.g. "82% of cases used the optimal number of tool calls or fewer"); `overage` is what feeds the mean/p90 distribution per category in the dashboard, so a regression that makes the agent take 6 calls instead of 1 is visible as a magnitude, not just a binary miss. `retries` is reported alongside but kept separate, since a groundedness retry is a different kind of cost (a correctness safety net firing) than an inefficient plan.
 
 A case only runs the scorers relevant to its declared `expected.behavior`: an `answer` case runs numeric_correctness + groundedness + efficiency (+ contextual_correctness if multi-turn); a `clarify`/`refuse` case runs only clarification/refusal (there's no ledger or numeric claim to check).
 
@@ -216,8 +225,11 @@ A case only runs the scorers relevant to its declared `expected.behavior`: an `a
 class TestCaseResult(BaseModel):
     case_id: str
     category: str
-    scores: dict[str, bool]        # metric name -> pass/fail (includes both groundedness variants)
-    efficiency: dict[str, int]     # tool_calls, retries
+    scores: dict[str, bool]        # metric name -> pass/fail (includes both groundedness variants, and "efficient")
+    optimal_tool_calls: int        # copied from the test case, for dashboard display alongside the actual count
+    actual_tool_calls: int
+    overage: int                   # actual_tool_calls - optimal_tool_calls
+    retries: int
     trace_refs: list[str]          # paths to the RunTrace file(s) for this case
 
 class RunRecord(BaseModel):
@@ -250,7 +262,7 @@ finance-qna eval dashboard
 
 - Latest run's pass rate by metric, and by question category (the §4.4 row categories).
 - A trend line per metric across runs (x = timestamp, y = pass rate) — the direct source of an objective-5 "score improved from Y% to Z%" claim.
-- Efficiency distribution (tool calls, retries) per category, to catch a prompt change that "still passes" but got slower/more expensive.
+- Efficiency: the `efficient` pass rate (actual ≤ optimal), plus the `overage` distribution (mean/p90) per category, and `retries` separately, to catch a prompt change that "still passes" but now takes an extra unnecessary tool call (or, e.g., calls `list_categories_tool` defensively when the category was never in question).
 - Drill-down: select a failing case, view its full `RunTrace` (question → resolved question → every ledger entry → groundedness verdict → final answer) via `trace_refs`.
 - A view grouped by `agent_id` (a no-op today with one adapter, but the reason `agent_id` is a first-class store field), for the eventual side-by-side architecture/model comparison.
 - The optional `llm_judge` score, if present, is shown in a clearly separate, visually de-emphasized panel — never mixed into the headline pass rate.
@@ -275,4 +287,5 @@ Everything about additional architectures or models (a second `AgentAdapter`, a 
 
 - Whether `contextual_correctness`'s partial-match-on-flattened-args approach holds up once more tools (or a second architecture with a differently-shaped ledger) are added, or whether it needs to become tool-aware — deferred until step 4–5 above surface a real false-positive/negative.
 - Whether the four adversarial groundedness cases (§4.4) need their own `expected.groundedness_ok: false`, or whether a well-behaved agent should always land on `groundedness_ok: true` (caveated but still verified) — resolved by writing those cases and seeing what a correct agent actually does against them, not decided a priori.
+- `optimal_tool_calls` labels go stale in one specific way: adding a new tool, or changing an existing tool's capabilities (e.g. letting `aggregate_spending_tool` take multiple categories at once), can *lower* the true optimum for existing test cases without anyone touching the test set. There's no automatic detection for this — it relies on whoever changes `tools/registry.py` re-reading the affected `optimal_tool_calls` labels, which is a manual step worth calling out in review rather than a solved problem here.
 - How much of `AgentAdapter` a genuinely different architecture (e.g. a single-prompt baseline with no tool-call ledger at all) can actually satisfy — likely just `resolved_question`, `route` (or `None`), and `final_answer`/`draft_answer.claims`, with `ledger` always empty. The scorer graceful-degradation behavior in §2/§6 is designed for this, but hasn't been exercised against a real second adapter yet.
