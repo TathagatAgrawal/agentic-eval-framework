@@ -12,9 +12,16 @@ it, sending it back to act for a bounded retry with a note about what was
 unsupported, or falling back to a caveated response once retries are exhausted.
 
 The graph itself is a pure function of `AgentState`: it reads `session_memory`
-as input but never mutates an external session object. Turning a completed run
-into the next turn's `TurnMemory` (via `state.turn_memory_from_state`) and
-appending it to a `SessionMemory` is the caller's job -- see `memory/session.py`.
+as input but never mutates an external session object. Converting a completed
+run into the next turn's `TurnMemory` and threading it across turns is the
+caller's job -- see `agent/langgraph_adapter.py`, the only code that invokes
+this graph directly.
+
+`classifier_llm` is a separate, optional model for the cheap classification
+nodes (`contextualize`, `route`), distinct from `agent_llm` used for the
+heavier reasoning nodes (`act`, `draft_answer`, `clarify`, `refuse`) -- this
+two-model-role split is specific to this architecture, which is why it's a
+parameter here rather than a global setting; see `LangGraphAgentConfig`.
 """
 
 from typing import Any
@@ -44,21 +51,27 @@ from finance_qna.tools.registry import build_tools
 
 def build_graph(
     engine: Engine,
-    llm: BaseChatModel,
+    agent_llm: BaseChatModel,
+    classifier_llm: BaseChatModel | None = None,
     max_tool_steps: int = 6,
     groundedness_retry_limit: int = 1,
 ) -> Any:
-    """Compile the agent graph, wired to `engine`'s data and `llm` for reasoning."""
+    """Compile the agent graph, wired to `engine`'s data and the given model(s).
+
+    `classifier_llm` defaults to `agent_llm` if not given, so a single model
+    can still run every node.
+    """
+    classifier_llm = classifier_llm or agent_llm
     tools = build_tools(engine)
 
     graph = StateGraph(AgentState)
-    graph.add_node("contextualize", make_contextualize_node(llm))
-    graph.add_node("route", make_route_node(llm))
-    graph.add_node("clarify", make_clarify_node(llm))
-    graph.add_node("refuse", make_refuse_node(llm))
-    graph.add_node("act", make_act_node(llm, tools))
+    graph.add_node("contextualize", make_contextualize_node(classifier_llm))
+    graph.add_node("route", make_route_node(classifier_llm))
+    graph.add_node("clarify", make_clarify_node(agent_llm))
+    graph.add_node("refuse", make_refuse_node(agent_llm))
+    graph.add_node("act", make_act_node(agent_llm, tools))
     graph.add_node("tool_node", make_tool_node(tools))
-    graph.add_node("draft_answer", make_draft_answer_node(llm))
+    graph.add_node("draft_answer", make_draft_answer_node(agent_llm))
     graph.add_node("ground_check", make_ground_check_node())
     graph.add_node("respond", make_respond_node())
     graph.add_node("respond_with_caveat", make_respond_with_caveat_node())

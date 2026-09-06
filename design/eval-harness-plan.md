@@ -62,13 +62,9 @@ Every expected numeric value comes from `data/ground_truth.json`, produced by th
 ```
 eval/
 ├── testset/
-│   ├── single_turn.yaml       # simple lookups, multi-condition, comparisons, trends
-│   ├── multi_turn.yaml        # conversational sequences
-│   ├── ambiguous.yaml         # should route to "clarify"
-│   └── out_of_scope.yaml      # should route to "refuse"
-├── adapters/
-│   ├── base.py                 # the AgentAdapter protocol (§2)
-│   └── langgraph_adapter.py    # wraps this project's build_graph as the first adapter
+│   ├── single_turn.yaml       # simple lookups, multi-condition, comparisons, trends,
+│   │                          # ambiguous ("clarify"), and out-of-scope ("refuse") cases
+│   └── multi_turn.yaml        # conversational sequences
 ├── scorers/
 │   ├── numeric_correctness.py
 │   ├── groundedness.py
@@ -76,11 +72,13 @@ eval/
 │   ├── clarification.py
 │   ├── refusal.py
 │   └── efficiency.py
-├── schema.py                  # TestCase / ExpectedResult pydantic models
+├── schema.py                  # TestCase / ExpectedResult pydantic models (implemented)
 ├── runner.py                  # drives any AgentAdapter against the test set
 ├── store.py                   # regression store read/write
 └── dashboard.py                # Streamlit app
 ```
+
+The `AgentAdapter` protocol and its one concrete implementation do **not** live under `eval/` — they live in `src/finance_qna/agent/adapter.py` and `src/finance_qna/agent/langgraph_adapter.py`. This is a deliberate change from an earlier version of this plan: the CLI (`finance-qna ask`/`chat`) needed the exact same architecture-agnostic seam so that *both* the CLI and the eval harness select model/architecture the same config-driven way (see §8) and never diverge in how a turn actually gets run. `eval/runner.py` imports `AgentAdapter`/`build_adapter` from `finance_qna.agent.adapter` like any other consumer.
 
 ### 4.3 Test case schema
 
@@ -153,20 +151,22 @@ eval/
 
 `optimal_tool_calls` is per-turn, not per-sequence, and must be computed against what the *current* architecture can actually do, not an idealized agent — `agent/state.py`'s `ledger` resets at the start of every turn, and `groundedness.verify()` only checks claims against *this turn's* ledger, so a claim can never cite a prior turn's tool result even though the value was already fetched. That's why the third turn above is labeled `1`, not `0`: the dining total from turn 1 isn't citable this turn, so at least one fresh tool call is unavoidable given how grounding currently works. If that per-turn reset ever changes (e.g. citations become allowed against `prior_turns`), this label would need to change with it — `optimal_tool_calls` documents the current architecture's ceiling, not a permanent property of the question.
 
-### 4.4 Test categories and target counts (v1)
+### 4.4 Test categories: shipped v1 vs. eventual expansion target
 
-| Category | Count (v1) | Exercises |
-|---|---|---|
-| Simple lookup | 8 | `aggregate_spending_tool`, one category/month |
-| Multi-condition / filtered | 6 | date ranges, min/max amount, account/merchant filters |
-| Comparison | 5 | `compare_periods_tool`, category-vs-category and period-vs-period |
-| Trend / anomaly | 5 | `detect_trend_tool`, `detect_subscription_changes_tool` — anchored to the two injected events |
-| Ambiguous (single-turn) | 5 | vague time period, no prior turn to resolve against |
-| Out-of-scope | 5 | investment advice, unrelated chit-chat, questions about data the schema doesn't have |
-| Multi-turn sequences | 8 sequences (2–4 turns each) | implicit reference, scope carry-over, comparative follow-up, and one sequence per pattern that *should* still hit `clarify` mid-conversation (a follow-up with no resolvable antecedent) |
-| Adversarial / groundedness stress | 4 | crafted to tempt a plausible-but-wrong number (e.g. "what's 15% more than my dining spend" — a derived value the model must compute correctly or the groundedness check should catch it) |
+The v1 set actually built is **15 cases**, deliberately capped there per the project's direction: each case carefully designed to exercise a specific mode or failure pattern rather than padded for volume. The larger counts below are this document's original sketch, kept as the expansion target for whenever more coverage per category is worth the maintenance cost — not a gap to fill immediately.
 
-~46 test cases / sequences for v1 — enough to get a real pass-rate number per category without becoming a maintenance burden. Expandable later without changing the schema. Because the dataset and expectations reference only `RunTrace` fields and `ground_truth.json`, this exact test set is what any future adapter gets evaluated against too — no separate test set per architecture.
+| Category | Shipped (v1) | Original target | Exercises |
+|---|---|---|---|
+| Simple lookup | 2 | 8 | `aggregate_spending_tool`, one category/month |
+| Multi-condition / filtered | 2 | 6 | date ranges, min/max amount, account/merchant filters |
+| Comparison | 2 | 5 | `aggregate_spending_tool`/`compare_periods_tool`, category-vs-category and period-vs-period |
+| Trend / anomaly | 2 | 5 | `detect_trend_tool`, `detect_subscription_changes_tool` — anchored to the two injected events |
+| Ambiguous (single-turn) | 1 | 5 | vague time period, no prior turn to resolve against |
+| Out-of-scope | 2 | 5 | investment advice, and a deliberately tricky finance-adjacent refusal ("what's my credit score?") |
+| Multi-turn sequences | 3 sequences (2–3 turns each) | 8 sequences | implicit reference, scope carry-over, comparative follow-up, and clarify mid-conversation (a follow-up with no resolvable antecedent) — one sequence per pattern |
+| Adversarial / groundedness stress | 1 | 4 | a derived-percentage question ("by what percentage did I spend more on X than Y") the model must compute correctly and the groundedness check must validate as a supported derived value |
+
+Because the dataset and expectations reference only `RunTrace` fields and `ground_truth.json`, this exact test set is what any future adapter gets evaluated against too — no separate test set per architecture.
 
 ## 5. The Runner
 
@@ -187,7 +187,7 @@ graph TD
     Aggregate --> Store["eval/store.py -> eval/runs/<run_id>.json"]
 ```
 
-`eval/runner.py` depends only on the `AgentAdapter` protocol from §2 — it calls `adapter.run_turn(question, prior_turns)` and gets a `RunTrace` back, full stop. `eval/adapters/langgraph_adapter.py` is the (only, for now) concrete implementation, and internally it's exactly the pieces the CLI already uses (`finance_qna.agent.graph.build_graph`, `finance_qna.agent.state.initial_state`, `finance_qna.tracing.trace.build_trace`, plus a small `RunTrace -> TurnMemory` conversion for its own `session_memory` input). This is what makes the harness's "did the agent do X" measurements trustworthy: it observes the same `RunTrace` shape the CLI writes to `runs/`, produced by literally invoking `graph.invoke()` — the runner itself never knows that.
+`eval/runner.py` depends only on the `AgentAdapter` protocol from §2 — it calls `adapter.run_turn(question, prior_turns)` and gets a `RunTrace` back, full stop, via `finance_qna.agent.adapter.build_adapter(settings)`. `finance_qna.agent.langgraph_adapter.LangGraphAdapter` is the (only, for now) concrete implementation, and it's exactly the pieces the CLI also uses (`finance_qna.agent.graph.build_graph`, `finance_qna.agent.state.initial_state`, `finance_qna.tracing.trace.build_trace`/`turn_memory_from_trace`). This is what makes the harness's "did the agent do X" measurements trustworthy: it observes the same `RunTrace` shape the CLI writes to `runs/`, produced by literally invoking `graph.invoke()` — the runner itself never knows that, and neither does the CLI.
 
 For a multi-turn sequence, the runner accumulates the `RunTrace` list for the sequence so far and passes it as `prior_turns` on each subsequent call — the adapter decides what to do with that history.
 
@@ -211,7 +211,7 @@ def run_test_case(adapter: AgentAdapter, case: TestCase) -> TestCaseResult:
 Each scorer has the signature `score(trace: RunTrace, expected: ExpectedResult) -> ScoreResult`, is a pure function, and (per objective 4) uses no LLM except the clearly-secondary, non-gating `llm_judge`. None of them import LangGraph or any agent-internal type — only `RunTrace` and `finance_qna.agent.groundedness.verify` (itself already framework-independent).
 
 - **`numeric_correctness`**: pass iff any value in `trace.draft_answer.claims` is within `tolerance` of `expected.value` (or, for `expected.values`, every expected value is matched by some claim — covers comparison questions that state two totals).
-- **`groundedness`**: reports two booleans — `groundedness_ok` (pass iff `trace.groundedness_ok` matches expected, normally `True`) and `harness_groundedness_ok` (pass iff `verify(trace.draft_answer, trace.ledger).ok` matches expected — see §2). The four adversarial cases in §4.4 are the only ones expected to potentially land on `False` on either.
+- **`groundedness`**: reports two booleans — `groundedness_ok` (pass iff `trace.groundedness_ok` matches expected, normally `True`) and `harness_groundedness_ok` (pass iff `verify(trace.draft_answer, trace.ledger).ok` matches expected — see §2). The adversarial case(s) in §4.4 (`adversarial_001` today) are the only ones expected to potentially land on `False` on either.
 - **`contextual_correctness`** (multi-turn only): pass iff every key/value in `expected_context` is found in the flattened `args` of some ledger entry from that turn; reported as "not applicable" if `trace.ledger` is empty and the architecture has no equivalent concept.
 - **`clarification`**: pass iff (`expected.behavior == "clarify"`) `==` (`trace.route == "clarify"`) — checked both directions, so an unwanted clarification on an answerable question fails too.
 - **`refusal`**: same structure, for `route == "refuse"`.
@@ -250,11 +250,11 @@ Stored as `eval/runs/<run_id>.json` (git-tracked — a run record is a few KB, a
 Extends the existing `finance-qna` Typer app (`src/finance_qna/cli/main.py`) rather than a separate binary:
 
 ```
-finance-qna eval run [--suite single_turn|multi_turn|ambiguous|out_of_scope|all] [--agent langgraph-gemini-3.5-flash-lite] [--label "prompt tweak X"]
+finance-qna eval run [--suite single_turn|multi_turn|all] [--label "prompt tweak X"]
 finance-qna eval dashboard
 ```
 
-`--agent` selects an `AgentAdapter` by id from a small registry (today, exactly one: the LangGraph adapter); it defaults to that one so the flag is invisible until a second adapter exists. `eval run` prints a summary table to the terminal (pass rate per metric/category) in addition to writing the `RunRecord`, so a quick prompt-iteration loop doesn't require opening the dashboard every time.
+There's no separate `--agent`/model flag on `eval run` itself: which architecture and model(s) run is controlled by the same `AGENT_ARCHITECTURE` (`Settings`, universal) and `LANGGRAPH_AGENT_MODEL`/`LANGGRAPH_CLASSIFIER_MODEL` (`LangGraphAgentConfig`, architecture-specific) environment variables that `finance-qna ask`/`chat` already read — set them once and every entry point picks it up, rather than eval having its own separate selection mechanism that could drift from what the CLI actually runs. `eval run` prints a summary table to the terminal (pass rate per metric/category) in addition to writing the `RunRecord`, so a quick prompt-iteration loop doesn't require opening the dashboard every time.
 
 ## 9. Dashboard
 
@@ -271,8 +271,8 @@ finance-qna eval dashboard
 
 Mirrors how the agent itself was built: deterministic pieces first, so most of the harness is testable with zero LLM calls before it ever drives a real agent.
 
-1. **Schema + fixtures**: `eval/schema.py` (TestCase/ExpectedResult models), and hand-author the ~46 cases in `eval/testset/*.yaml` against the existing `ground_truth.json`. Fully offline.
-2. **Adapter interface**: `eval/adapters/base.py` (the `AgentAdapter` protocol, §2) and `eval/adapters/langgraph_adapter.py` (the one concrete implementation, wrapping `build_graph`). This is the only place LangGraph/Gemini specifics are allowed to leak into the eval package.
+1. ✅ **Schema + fixtures**: `eval/schema.py` (TestCase/ExpectedResult models), and a hand-authored, curated **15-case** v1 test set in `eval/testset/*.yaml` against the existing `ground_truth.json` — smaller than the ~46 originally sketched in §4.4 (kept here for reference as the eventual expansion target), chosen deliberately small so each case is carefully designed rather than padded for count, spanning easy → hard across every category in §4.4. Fully offline; validated by `tests/test_eval_schema.py`.
+2. ✅ **Adapter interface**: `finance_qna.agent.adapter` (the `AgentAdapter` protocol + `build_adapter` factory) and `finance_qna.agent.langgraph_adapter` (the one concrete implementation, wrapping `build_graph`) — built under `src/finance_qna/agent/`, not `eval/`, once it became clear the CLI needed the exact same seam (see the note in §4.2). `Settings` (universal: credentials, `agent_architecture`, `db_path`) and `LangGraphAgentConfig` (architecture-specific: both model roles, tool-loop limit, retry limit) were split apart at the same time, so model/architecture choice never leaks into shared code. Validated by `tests/test_langgraph_adapter.py` and `tests/test_config.py`.
 3. **Scorers**: implement all six as pure functions against hand-built `RunTrace` fixtures (no adapter invocation) — same testing style as `agent/groundedness.py`'s own unit tests. Fully offline.
 4. **Runner (single-turn)**: wire `run_test_case` against the `AgentAdapter` protocol, run once manually with the LangGraph adapter to confirm wiring, then rely on a fake `AgentAdapter` (returning scripted `RunTrace`s, no LLM at all) for the runner's own test suite.
 5. **Runner (multi-turn)**: add the `prior_turns`-threading path for sequences.
@@ -281,11 +281,11 @@ Mirrors how the agent itself was built: deterministic pieces first, so most of t
 8. **Dashboard**: Streamlit app against the store.
 9. **First real run**: execute the full suite live against Gemini once, establishing the baseline numbers objective 5 needs. Budget this against the `gemini-3.5-flash-lite` free-tier quota headroom noted in the HLD/LLD — batch it into one deliberate run rather than iterating live.
 
-Everything about additional architectures or models (a second `AgentAdapter`, a `--agent` value beyond the default, cross-architecture dashboard views) is explicitly **not** part of this build order — it's the reason step 2 exists as its own step instead of being inlined into the runner, so that door is open without being walked through yet.
+Everything about additional architectures or models (a second `AgentAdapter`, a `--agent` value beyond the default, cross-architecture dashboard views) is explicitly **not** part of this build order — it's the reason step 2 produced a real, general interface instead of something eval-specific, so that door is open without being walked through yet.
 
 ## 11. Open Questions
 
 - Whether `contextual_correctness`'s partial-match-on-flattened-args approach holds up once more tools (or a second architecture with a differently-shaped ledger) are added, or whether it needs to become tool-aware — deferred until step 4–5 above surface a real false-positive/negative.
-- Whether the four adversarial groundedness cases (§4.4) need their own `expected.groundedness_ok: false`, or whether a well-behaved agent should always land on `groundedness_ok: true` (caveated but still verified) — resolved by writing those cases and seeing what a correct agent actually does against them, not decided a priori.
+- Whether the adversarial groundedness case(s) in §4.4 need their own `expected.groundedness_ok: false`, or whether a well-behaved agent should always land on `groundedness_ok: true` (caveated but still verified) — a live check of `adversarial_001` already shows the current agent lands on `groundedness_ok: true` (its derived-percentage computation matches the supported percentage-change formula in `verify()`), so the default `expected.groundedness_ok: true` was kept; this stays an open question for whatever gets added as the set expands toward the §4.4 target.
 - `optimal_tool_calls` labels go stale in one specific way: adding a new tool, or changing an existing tool's capabilities (e.g. letting `aggregate_spending_tool` take multiple categories at once), can *lower* the true optimum for existing test cases without anyone touching the test set. There's no automatic detection for this — it relies on whoever changes `tools/registry.py` re-reading the affected `optimal_tool_calls` labels, which is a manual step worth calling out in review rather than a solved problem here.
 - How much of `AgentAdapter` a genuinely different architecture (e.g. a single-prompt baseline with no tool-call ledger at all) can actually satisfy — likely just `resolved_question`, `route` (or `None`), and `final_answer`/`draft_answer.claims`, with `ledger` always empty. The scorer graceful-degradation behavior in §2/§6 is designed for this, but hasn't been exercised against a real second adapter yet.

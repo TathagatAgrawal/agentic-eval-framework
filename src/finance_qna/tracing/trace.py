@@ -1,11 +1,13 @@
-"""Per-turn run traces: the "show its reasoning transparently" feature.
+"""Per-turn run traces: the "show its reasoning transparently" feature, and the
+model-/architecture-agnostic contract `AgentAdapter` implementations return.
 
-Built from a completed `AgentState` by the caller (the CLI, or later the eval
-runner) rather than written from inside a graph node -- consistent with how
-`TurnMemory` is built via `state.turn_memory_from_state` instead of a node
-mutating an external object. This keeps the graph a pure function of state, and
-is also the eval harness's sole planned way to inspect what a run actually did:
-question -> resolved question -> ledger -> groundedness verdict -> final answer.
+Built from a completed `AgentState` by the caller (the LangGraph adapter, see
+`agent/langgraph_adapter.py`) rather than written from inside a graph node --
+consistent with how `TurnMemory` is built via `state.turn_memory_from_state`
+instead of a node mutating an external object. This keeps the graph a pure
+function of state, and `RunTrace` is also the eval harness's sole way to inspect
+what a run actually did: question -> resolved question -> ledger ->
+groundedness verdict -> final answer -- see design/eval-harness-plan.md §2.
 """
 
 import json
@@ -14,7 +16,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from finance_qna.agent.answer import StructuredAnswer
-from finance_qna.agent.state import AgentState, LedgerEntry
+from finance_qna.agent.state import AgentState, LedgerEntry, TurnMemory
 
 
 class RunTrace(BaseModel):
@@ -45,6 +47,21 @@ def build_trace(state: AgentState, turn_id: str, latency_ms: int) -> RunTrace:
         retries=state["retry_count"],
         final_answer=state["final_answer"],
         latency_ms=latency_ms,
+    )
+
+
+def turn_memory_from_trace(trace: RunTrace, turn_id: int) -> TurnMemory:
+    """Convert a prior turn's `RunTrace` into the `TurnMemory` this project's own
+    graph needs for `contextualize`, so an `AgentAdapter` caller never has to
+    know `AgentState`/`TurnMemory` exist -- only `RunTrace` crosses that seam."""
+    assert trace.resolved_question is not None
+    assert trace.final_answer is not None
+    return TurnMemory(
+        turn_id=turn_id,
+        raw_question=trace.question,
+        resolved_question=trace.resolved_question,
+        final_answer=trace.final_answer,
+        ledger=trace.ledger,
     )
 
 

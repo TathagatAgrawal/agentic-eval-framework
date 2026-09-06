@@ -27,9 +27,9 @@ finance-qna-agent/
 │       │   ├── graph.py             # LangGraph StateGraph assembly
 │       │   ├── nodes.py             # node functions: contextualize, route, act, ground_check, respond
 │       │   ├── prompts.py           # system/task prompt templates
-│       │   └── groundedness.py      # claim extraction + ledger verification
-│       ├── memory/
-│       │   └── session.py           # SessionMemory: message history + structured TurnMemory list
+│       │   ├── groundedness.py      # claim extraction + ledger verification
+│       │   ├── adapter.py           # AgentAdapter protocol + build_adapter factory (see §6.1)
+│       │   └── langgraph_adapter.py # LangGraphAdapter + LangGraphAgentConfig, the one concrete adapter
 │       ├── tracing/
 │       │   └── trace.py             # RunTrace schema + writer (JSON per turn)
 │       └── cli/
@@ -223,18 +223,27 @@ def verify(draft: StructuredAnswer, ledger: list[LedgerEntry], tol: Decimal = De
 
 `extract_numeric_fields` walks the known result schemas (`AggregateResult.total`, `CompareResult.diff`, etc.) rather than doing generic dict traversal, so it stays exact and typed. `matches_derived_value` checks a small fixed set of combinations (a+b, a-b, a/b*100) across pairs of ledger values — enough for "is that more or less" style claims — and is intentionally not a general expression evaluator, to keep the check deterministic and auditable.
 
-## 6. Conversational Memory (`memory/session.py`)
+## 6. Conversational Memory and the Agent Adapter
+
+Conversational memory is not its own module (an earlier version of this design had a standalone `memory/session.py::SessionMemory` class; it was removed once the pieces below made it redundant). Instead, cross-turn state is just `list[RunTrace]`, held by whoever is driving the agent (the CLI's `chat` loop, or the eval runner) and passed as `prior_turns` to each call — never persisted to disk, matching the non-goal of no cross-session memory.
+
+### 6.1 `agent/adapter.py` — the `AgentAdapter` protocol
 
 ```python
-class SessionMemory:
-    messages: list[BaseMessage]
-    turns: list[TurnMemory]
+class AgentAdapter(Protocol):
+    id: str
+    def run_turn(self, question: str, prior_turns: list[RunTrace]) -> RunTrace: ...
 
-    def last_turn(self) -> TurnMemory | None: ...
-    def append_turn(self, turn: TurnMemory) -> None: ...
+def build_adapter(settings: Settings) -> AgentAdapter: ...
 ```
 
-Held in-process for the CLI's interactive `chat` session (a plain object passed into `graph.invoke(..., config)` per turn, not persisted to disk), matching the non-goal of no cross-session memory. The eval harness's multi-turn runner instantiates a fresh `SessionMemory` per test sequence.
+This exists because the CLI and the (planned) eval harness both need to run a turn without knowing LangGraph exists — see design/eval-harness-plan.md §2 for the full rationale. `build_adapter` is the one place that branches on `settings.agent_architecture` to construct a concrete adapter; today there's exactly one branch.
+
+### 6.2 `agent/langgraph_adapter.py` — the one concrete adapter
+
+`LangGraphAdapter.run_turn` is what used to be `SessionMemory` plus the CLI's turn-running logic, combined: given `prior_turns: list[RunTrace]`, it takes the last `recent_turns` (default 2) entries whose `route == "answer"`, converts each into this graph's own `TurnMemory` via `tracing.trace.turn_memory_from_trace`, and passes that as `session_memory` into `initial_state`. After `graph.invoke()` returns, it converts the resulting `AgentState` into a `RunTrace` via `build_trace` — so `AgentState`/`TurnMemory` never leave this module.
+
+`LangGraphAgentConfig` (also in this module) owns everything specific to this architecture — both model roles, the tool-loop step limit, the groundedness retry limit — loaded from `LANGGRAPH_*`-prefixed environment variables, deliberately separate from the universal `Settings` in `config.py` (§8). A different architecture would define its own config with its own fields instead of extending this one.
 
 ## 7. Prompts (`agent/prompts.py`)
 
@@ -242,20 +251,30 @@ Held in-process for the CLI's interactive `chat` session (a plain object passed 
 - Each node with an LLM call has its own narrow prompt template (contextualize, route, draft_answer, clarify, refuse) rather than one giant prompt — keeps structured-output schemas small and each call's failure mode easy to isolate and eval independently.
 - All LLM calls go through `.with_structured_output(PydanticModel)` (Gemini function-calling under the hood via `langchain-google-genai`) — no hand-parsed free text anywhere in the control flow.
 
-## 8. Configuration (`config.py`)
+## 8. Configuration (`config.py` + per-architecture config)
+
+`Settings` holds only what's universal across every architecture — it must never grow a field that only one architecture cares about (see design/eval-harness-plan.md §2):
 
 ```python
 class Settings(BaseSettings):
     google_api_key: SecretStr
-    agent_model: str = "gemini-3.5-flash-lite"
-    classifier_model: str = "gemini-3.5-flash-lite"  # kept as a separate setting so route/contextualize can move to a different model independently of the agent loop
+    agent_architecture: str = "langgraph"  # which AgentAdapter build_adapter() constructs
     db_path: Path = Path("data/synthetic_transactions.db")
-    max_tool_steps: int = 6
-    groundedness_retry_limit: int = 1
     model_config = SettingsConfigDict(env_file=".env")
 ```
 
-A `get_llm(name: str) -> BaseChatModel` factory centralizes `ChatGoogleGenerativeAI` construction so model choice is swappable per node without touching node logic — also what the eval harness uses to run the same test set against a different model/prompt version for regression comparison.
+Everything architecture-specific lives with that architecture instead. For the LangGraph architecture, that's `LangGraphAgentConfig` in `agent/langgraph_adapter.py` (§6.2):
+
+```python
+class LangGraphAgentConfig(BaseSettings):
+    agent_model: str = "gemini-3.5-flash-lite"        # act, draft_answer, clarify, refuse
+    classifier_model: str = "gemini-3.5-flash-lite"    # contextualize, route (cheaper model candidate)
+    max_tool_steps: int = 6
+    groundedness_retry_limit: int = 1
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="LANGGRAPH_")
+```
+
+A `get_llm(model_name: str) -> BaseChatModel` factory in `config.py` centralizes `ChatGoogleGenerativeAI` construction so model choice is swappable without touching node logic; it takes a plain model id string, not a `Settings` field, so any architecture's own config can call it. `build_adapter` (§6.1) is what the CLI and eval harness both call to get a ready-to-use `AgentAdapter` — neither one calls `get_llm`, `build_graph`, or reads `LangGraphAgentConfig` directly.
 
 ## 9. Tracing (`tracing/trace.py`)
 

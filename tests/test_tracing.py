@@ -5,7 +5,7 @@ from pathlib import Path
 
 from finance_qna.agent.answer import Claim, StructuredAnswer
 from finance_qna.agent.state import initial_state
-from finance_qna.tracing.trace import build_trace, read_trace, write_trace
+from finance_qna.tracing.trace import build_trace, read_trace, turn_memory_from_trace, write_trace
 
 
 def _completed_state():
@@ -58,3 +58,18 @@ def test_write_trace_then_read_trace_round_trips(tmp_path: Path) -> None:
     assert path == tmp_path / "session-abc" / "1.json"
     assert path.exists()
     assert read_trace(path) == trace
+
+
+def test_turn_memory_from_trace_converts_fields() -> None:
+    """turn_memory_from_trace must carry the trace's question/answer/ledger over,
+    so an AgentAdapter caller never has to build a TurnMemory by hand."""
+    state = _completed_state()
+    trace = build_trace(state, turn_id="1", latency_ms=42)
+
+    turn_memory = turn_memory_from_trace(trace, turn_id=1)
+
+    assert turn_memory["turn_id"] == 1
+    assert turn_memory["raw_question"] == trace.question
+    assert turn_memory["resolved_question"] == trace.resolved_question
+    assert turn_memory["final_answer"] == trace.final_answer
+    assert turn_memory["ledger"] == trace.ledger

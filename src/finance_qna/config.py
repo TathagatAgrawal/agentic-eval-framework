@@ -1,9 +1,12 @@
-"""Application configuration and the LLM provider factory.
+"""Universal application configuration and the LLM provider factory.
 
-Centralizing `ChatGoogleGenerativeAI` construction here means model choice is
-swappable per agent node without touching node logic, and is also what the
-(future) evaluation harness uses to run the same test set against a different
-model or prompt version for regression comparison.
+`Settings` holds only what every architecture needs regardless of which one is
+selected: credentials, which architecture to run, and where the data lives.
+Anything specific to one architecture -- which model(s) it uses, tool-loop
+limits, retry counts -- belongs to that architecture's own config instead (e.g.
+`agent.langgraph_adapter.LangGraphAgentConfig`), per
+design/eval-harness-plan.md §2: model/architecture choice must not leak into
+shared, architecture-agnostic code.
 """
 
 from functools import lru_cache
@@ -20,11 +23,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     google_api_key: SecretStr
-    agent_model: str = "gemini-3.5-flash-lite"
-    classifier_model: str = "gemini-3.5-flash-lite"
+    agent_architecture: str = "langgraph"  # which AgentAdapter to build; see agent/adapter.py
     db_path: Path = Path("data/synthetic_transactions.db")
-    max_tool_steps: int = 6
-    groundedness_retry_limit: int = 1
 
 
 @lru_cache
@@ -36,9 +36,9 @@ def get_settings() -> Settings:
 def get_llm(model_name: str) -> ChatGoogleGenerativeAI:
     """Build a `ChatGoogleGenerativeAI` client for `model_name` using the configured API key.
 
-    `model_name` is expected to be one of the model names in `Settings`
-    (e.g. `settings.agent_model` or `settings.classifier_model`), not necessarily
-    a literal Gemini model id, so callers stay decoupled from the specific model.
+    `model_name` is a plain Gemini model id, not a `Settings` field -- callers
+    (an architecture's own config, e.g. `LangGraphAgentConfig.agent_model`)
+    decide what to pass here, so this stays reusable by any architecture.
     """
     settings = get_settings()
     return ChatGoogleGenerativeAI(
