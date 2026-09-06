@@ -1,12 +1,13 @@
 """Output schemas for one test case's scored result and one full eval run.
 
 Kept separate from `eval/schema.py` (the test-case *input* schema) and from
-`eval/store.py` (persistence, not yet built) so the runner can be built and
-tested before the regression store exists, per the build order in
+`eval/store.py` (persistence) so the runner could be built and tested before
+the regression store existed, per the build order in
 design/eval-harness-plan.md §10.
 """
 
 from datetime import datetime
+from typing import ClassVar
 
 from pydantic import BaseModel
 
@@ -14,6 +15,8 @@ from pydantic import BaseModel
 class TestCaseResult(BaseModel):
     """The scored outcome of one test case (single-turn, or an aggregated
     multi-turn sequence)."""
+
+    __test__: ClassVar[bool] = False  # tell pytest this isn't a test class despite the name
 
     case_id: str
     category: str
