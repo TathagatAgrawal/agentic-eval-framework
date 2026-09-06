@@ -1,11 +1,16 @@
-"""A fake LLM test double so agent-graph tests never call the real Gemini API.
+"""Fake test doubles so tests never call the real Gemini API.
 
-Implements just enough of the `BaseChatModel` surface (`bind_tools`,
+`FakeLLM` implements just enough of the `BaseChatModel` surface (`bind_tools`,
 `with_structured_output`, `invoke`) for the node factories in `agent/nodes.py`
 to work against it, returning pre-scripted responses in order. A single class
 covers every node because the same `llm` instance is bound differently by
 different nodes (tool-calling for `act`, structured output for `route` and
 `draft_answer`, plain `invoke` for `clarify`/`refuse`).
+
+`FakeAdapter` implements the `AgentAdapter` protocol directly, one level above
+`FakeLLM` -- it lets eval-runner tests exercise `run_test_case`/`run_eval`
+without any agent, graph, or LLM at all, per design/eval-harness-plan.md's
+build-order note that the runner should be testable against a fake adapter.
 """
 
 from collections.abc import Iterator, Sequence
@@ -13,6 +18,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
+
+from finance_qna.tracing.trace import RunTrace
 
 
 class FakeLLM:
@@ -74,4 +81,20 @@ class _StructuredLLM:
 
     def invoke(self, messages: list[BaseMessage]) -> BaseModel:
         """Return the next scripted structured response."""
+        return next(self._responses)
+
+
+class FakeAdapter:
+    """A scripted `AgentAdapter`: returns pre-built `RunTrace`s in order,
+    regardless of the question or `prior_turns` passed in."""
+
+    def __init__(self, id: str, responses: Sequence[RunTrace]) -> None:
+        """Store the adapter id and the scripted RunTraces to return in order."""
+        self.id = id
+        self._responses: Iterator[RunTrace] = iter(responses)
+        self.calls: list[tuple[str, list[RunTrace]]] = []
+
+    def run_turn(self, question: str, prior_turns: list[RunTrace]) -> RunTrace:
+        """Record the call and return the next scripted RunTrace."""
+        self.calls.append((question, list(prior_turns)))
         return next(self._responses)
