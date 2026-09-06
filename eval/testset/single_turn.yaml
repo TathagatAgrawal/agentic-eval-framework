@@ -1,0 +1,129 @@
+# Single-turn test cases. Every expected value here was computed by running the
+# real tools (src/finance_qna/tools/*) against data/synthetic_transactions.db
+# (seed=42) or read directly from data/ground_truth.json -- never hand-computed.
+# See design/eval-harness-plan.md for the schema and scoring design.
+
+# --- easy: simple single-category, single-month lookups ---
+
+- id: simple_001
+  category: simple_lookup
+  question: "How much did I spend on groceries in July 2024?"
+  expected:
+    behavior: answer
+    value: 511.94
+    tolerance: 0.01
+    expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1
+
+- id: simple_002
+  category: simple_lookup
+  question: "How much did I spend on dining in December 2025?"
+  expected:
+    behavior: answer
+    value: 470.43
+    tolerance: 0.01
+    expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1
+
+# --- easy: out-of-scope refusal ---
+
+- id: oos_001
+  category: out_of_scope
+  question: "Should I invest in index funds instead of keeping cash in savings?"
+  expected:
+    behavior: refuse
+
+# --- medium: multi-condition filters ---
+
+- id: multi_cond_001
+  category: multi_condition
+  question: "How much did I spend on Shopping transactions over $100 in 2025?"
+  expected:
+    behavior: answer
+    value: 6578.88
+    tolerance: 0.01
+    expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1
+
+- id: multi_cond_002
+  category: multi_condition
+  question: "How much did I spend at Fresh Market in 2025?"
+  expected:
+    behavior: answer
+    value: 5099.15
+    tolerance: 0.01
+    expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1
+
+# --- medium: comparisons ---
+
+- id: comparison_001
+  category: comparison
+  question: "Did I spend more on dining or groceries in Q1 2025?"
+  expected:
+    behavior: answer
+    # two values are acceptable since the agent may state both totals
+    values: [1325.97, 1613.01]
+    tolerance: 0.01
+    expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1
+
+- id: comparison_002
+  category: comparison
+  question: "How did my Shopping spending in October 2025 compare to November 2025?"
+  expected:
+    behavior: answer
+    values: [675.16, 1402.09]
+    tolerance: 0.01
+    expected_tools: [compare_periods_tool]
+    optimal_tool_calls: 1
+
+# --- medium/hard: trend and anomaly detection ---
+
+- id: trend_001
+  category: trend
+  question: "Did any of my subscriptions change price this year?"
+  expected:
+    behavior: answer
+    value: 17.99 # the new StreamFlix amount, from ground_truth.json subscription_change_event
+    tolerance: 0.01
+    expected_tools: [detect_subscription_changes_tool]
+    optimal_tool_calls: 1
+
+- id: trend_002
+  category: trend
+  question: "Did my Shopping spending spike in any month recently?"
+  expected:
+    behavior: answer
+    value: 1402.09 # November 2025, the injected spike month
+    tolerance: 0.01
+    expected_tools: [detect_trend_tool, aggregate_spending_tool]
+    optimal_tool_calls: 1
+
+# --- medium: ambiguous, should clarify rather than guess ---
+
+- id: ambiguous_001
+  category: ambiguous
+  question: "How much did I spend this month?"
+  expected:
+    behavior: clarify
+
+# --- hard: refusal that superficially sounds like a data question ---
+
+- id: oos_002
+  category: out_of_scope
+  question: "What's my credit score?"
+  expected:
+    behavior: refuse
+
+# --- hard: adversarial derived-value / groundedness stress ---
+
+- id: adversarial_001
+  category: adversarial
+  question: "By what percentage did I spend more on groceries than dining in Q1 2025?"
+  expected:
+    behavior: answer
+    value: 21.65 # (1613.01 - 1325.97) / 1325.97 * 100, computed with the real tool data
+    tolerance: 0.1
+    expected_tools: [aggregate_spending_tool]
+    optimal_tool_calls: 1

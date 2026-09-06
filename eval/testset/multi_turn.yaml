@@ -1,0 +1,70 @@
+# Multi-turn conversational sequences. Each exercises a specific reference-
+# resolution pattern from the feature list (implicit reference, scope
+# carry-over, comparative follow-up) or the clarify-mid-conversation case.
+# Expected values are computed the same way as single_turn.yaml -- from the
+# real tools against the seeded fixture data, never hand-computed.
+
+- id: multi_001
+  category: multi_turn
+  # implicit reference (turn 2 inherits the Q1 2025 period) + comparative
+  # follow-up (turn 3 resolves "that" to groceries and compares to dining)
+  turns:
+    - question: "How much did I spend on dining in Q1 2025?"
+      expected:
+        behavior: answer
+        value: 1325.97
+        tolerance: 0.01
+        optimal_tool_calls: 1
+    - question: "What about groceries?"
+      expected:
+        behavior: answer
+        value: 1613.01
+        tolerance: 0.01
+        expected_context:
+          category: "Groceries"
+        optimal_tool_calls: 1
+    - question: "Is that more or less than dining?"
+      expected:
+        behavior: answer
+        value: 1613.01
+        tolerance: 0.01
+        expected_context:
+          category: "Groceries"
+        # a fresh tool call is required since groundedness checks only this
+        # turn's ledger and can't cite turn 1's result -- see the LLD note in
+        # design/eval-harness-plan.md §4.3 on why this isn't 0
+        optimal_tool_calls: 1
+
+- id: multi_002
+  category: multi_turn
+  # implicit reference only: same category, new time period, no comparison
+  turns:
+    - question: "How much did I spend on Transport in Q1 2025?"
+      expected:
+        behavior: answer
+        value: 840.99
+        tolerance: 0.01
+        optimal_tool_calls: 1
+    - question: "What about in Q2?"
+      expected:
+        behavior: answer
+        value: 815.72
+        tolerance: 0.01
+        expected_context:
+          category: "Transport"
+        optimal_tool_calls: 1
+
+- id: multi_003
+  category: multi_turn
+  # a follow-up with no resolvable antecedent should still trigger a
+  # clarifying question mid-conversation, not a guess
+  turns:
+    - question: "How much did I spend on Utilities in 2025?"
+      expected:
+        behavior: answer
+        value: 2233.97
+        tolerance: 0.01
+        optimal_tool_calls: 1
+    - question: "What about last time?"
+      expected:
+        behavior: clarify
