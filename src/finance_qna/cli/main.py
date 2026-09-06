@@ -100,6 +100,9 @@ def chat() -> None:
 def eval_run(
     suite: str = typer.Option("all", help="Which suite to run: single_turn, multi_turn, or all."),
     label: str = typer.Option("", help="A short label for this run, e.g. a git short-SHA."),
+    limit: int | None = typer.Option(
+        None, help="Only run the first N cases (useful under a tight rate limit)."
+    ),
 ) -> None:
     """Run the eval test set against the configured agent and print a pass-rate summary."""
     _ensure_eval_importable()
@@ -119,6 +122,8 @@ def eval_run(
         raise typer.Exit(code=1)
 
     cases = load_test_cases(*suite_files[suite])
+    if limit is not None:
+        cases = cases[:limit]
     adapter = build_adapter(get_settings())
 
     run_id = uuid.uuid4().hex[:8]

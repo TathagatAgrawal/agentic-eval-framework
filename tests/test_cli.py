@@ -71,3 +71,37 @@ def test_eval_run_writes_a_run_record(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "agent=fake-cli" in result.output
     saved_runs = list((tmp_path / "eval" / "runs").glob("*.json"))
     assert len(saved_runs) == 1
+
+
+def test_eval_run_limit_caps_the_number_of_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--limit N` must run only the first N cases, e.g. to stay under a rate limit."""
+    testset_dir = tmp_path / "eval" / "testset"
+    testset_dir.mkdir(parents=True)
+    shutil.copy(
+        REPO_ROOT / "eval" / "testset" / "single_turn.yaml", testset_dir / "single_turn.yaml"
+    )
+
+    generic_trace = RunTrace(
+        turn_id="1",
+        question="q",
+        resolved_question="q",
+        route="answer",
+        ledger=[],
+        draft_answer=None,
+        groundedness_ok=True,
+        retries=0,
+        final_answer="a",
+        latency_ms=1,
+    )
+    fake_adapter = FakeAdapter(id="fake-cli", responses=[generic_trace] * 5)
+
+    monkeypatch.setattr("finance_qna.cli.main._repo_root", lambda: tmp_path)
+    monkeypatch.setattr("finance_qna.cli.main.build_adapter", lambda settings: fake_adapter)
+
+    result = runner.invoke(app, ["eval", "run", "--suite", "single_turn", "--limit", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert "(5 cases" in result.output
+    assert len(fake_adapter.calls) == 5
