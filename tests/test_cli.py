@@ -1,17 +1,25 @@
-"""Tests for the CLI's `data generate` command.
+"""Tests for the CLI's `data generate` and `eval run` commands.
 
 `ask` and `chat` are not covered here since they require a real Gemini call to
 exercise meaningfully -- they're verified manually/live instead, per the
 project's directive to keep the automated test suite free of API calls.
+`eval run` is covered with a FakeAdapter (no LLM) against a temp copy of the
+real testset, isolated from the repo's actual `eval/runs/`.
 """
 
+import shutil
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from finance_qna.cli.main import app
+from finance_qna.tracing.trace import RunTrace
+from tests.fakes import FakeAdapter
 
 runner = CliRunner()
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_data_generate_creates_database_and_ground_truth(tmp_path: Path) -> None:
@@ -24,3 +32,42 @@ def test_data_generate_creates_database_and_ground_truth(tmp_path: Path) -> None
     assert db_path.exists()
     assert (db_path.parent / "ground_truth.json").exists()
     assert "seed=7" in result.output
+
+
+def test_eval_run_writes_a_run_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`finance-qna eval run` must run every case through the adapter and save a RunRecord.
+
+    Isolated from the real repo: `_repo_root` is monkeypatched to a tmp dir
+    (with a copy of the real single_turn testset), and `build_adapter` is
+    monkeypatched to a FakeAdapter, so this never touches the real
+    `eval/runs/`, the real `runs/`, or the Gemini API.
+    """
+    testset_dir = tmp_path / "eval" / "testset"
+    testset_dir.mkdir(parents=True)
+    shutil.copy(
+        REPO_ROOT / "eval" / "testset" / "single_turn.yaml", testset_dir / "single_turn.yaml"
+    )
+
+    generic_trace = RunTrace(
+        turn_id="1",
+        question="q",
+        resolved_question="q",
+        route="answer",
+        ledger=[],
+        draft_answer=None,
+        groundedness_ok=True,
+        retries=0,
+        final_answer="a",
+        latency_ms=1,
+    )
+    fake_adapter = FakeAdapter(id="fake-cli", responses=[generic_trace] * 12)
+
+    monkeypatch.setattr("finance_qna.cli.main._repo_root", lambda: tmp_path)
+    monkeypatch.setattr("finance_qna.cli.main.build_adapter", lambda settings: fake_adapter)
+
+    result = runner.invoke(app, ["eval", "run", "--suite", "single_turn"])
+
+    assert result.exit_code == 0, result.output
+    assert "agent=fake-cli" in result.output
+    saved_runs = list((tmp_path / "eval" / "runs").glob("*.json"))
+    assert len(saved_runs) == 1

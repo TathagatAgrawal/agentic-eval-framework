@@ -141,12 +141,21 @@ def _summarize(results: list[TestCaseResult]) -> dict[str, float]:
 
 
 def run_eval(
-    adapter: AgentAdapter, cases: list[TestCase], run_dir: Path, label: str = ""
+    adapter: AgentAdapter,
+    cases: list[TestCase],
+    run_dir: Path,
+    label: str = "",
+    run_id: str | None = None,
 ) -> RunRecord:
-    """Run every test case against `adapter`, scoring each, and aggregate a `RunRecord`."""
+    """Run every test case against `adapter`, scoring each, and aggregate a `RunRecord`.
+
+    `run_id` defaults to a fresh random id; callers that need to know the id
+    before traces are written (e.g. to name `run_dir` after it) can generate
+    one themselves and pass it in.
+    """
     results = [run_test_case(adapter, case, run_dir) for case in cases]
     return RunRecord(
-        run_id=uuid.uuid4().hex[:8],
+        run_id=run_id or uuid.uuid4().hex[:8],
         timestamp=datetime.now(UTC),
         agent_id=adapter.id,
         label=label,
