@@ -9,12 +9,22 @@ design/eval-harness-plan.md §2: model/architecture choice must not leak into
 shared, architecture-agnostic code.
 """
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The google-genai SDK logs a one-time warning recommending its own Chat
+# session wrapper over calling Models.generate_content directly with tools
+# bound ("automatic function calling"). That recommendation doesn't apply to
+# us -- LangChain's ChatGoogleGenerativeAI.bind_tools() manages the tool loop
+# itself, at a layer above this SDK -- so it's just noise on every call that
+# binds tools. Raising this logger's level suppresses it without touching any
+# other google-genai/langchain log output.
+logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 
 
 class Settings(BaseSettings):
