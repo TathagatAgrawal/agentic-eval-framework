@@ -22,6 +22,7 @@ from finance_qna.agent.prompts import (
     CLARIFY_INSTRUCTIONS,
     CONTEXTUALIZE_INSTRUCTIONS,
     DRAFT_ANSWER_INSTRUCTIONS,
+    GROUNDEDNESS_CAVEAT,
     REFUSE_INSTRUCTIONS,
     ROUTE_INSTRUCTIONS,
 )
@@ -320,10 +321,6 @@ def make_respond_with_caveat_node() -> Any:
     def respond_with_caveat(state: AgentState) -> dict[str, Any]:
         """Prepend a disclosure to the draft answer's text and finalize it."""
         assert state["draft_answer"] is not None
-        caveat = (
-            "Note: I could not fully verify one or more figures below against the "
-            "underlying data. Please double-check before relying on them.\n\n"
-        )
-        return {"final_answer": caveat + state["draft_answer"].text}
+        return {"final_answer": GROUNDEDNESS_CAVEAT + state["draft_answer"].text}
 
     return respond_with_caveat
