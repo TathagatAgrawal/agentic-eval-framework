@@ -12,6 +12,10 @@ original `langgraph` baseline.
 
 from typing import Protocol
 
+from finance_qna.agent.context_stuffing_adapter import (
+    ContextStuffingAdapter,
+    get_context_stuffing_config,
+)
 from finance_qna.agent.langgraph_adapter import LangGraphAdapter, get_langgraph_config
 from finance_qna.agent.monolithic_adapter import MonolithicReactAdapter, get_monolithic_config
 from finance_qna.config import Settings, get_llm
@@ -52,6 +56,14 @@ def build_adapter(settings: Settings) -> AgentAdapter:
             llm=get_llm(mono_config.model),
             model_name=mono_config.model,
             max_tool_steps=mono_config.max_tool_steps,
+        )
+
+    if settings.agent_architecture == "context_stuffing":
+        cs_config = get_context_stuffing_config()
+        return ContextStuffingAdapter(
+            engine=engine,
+            llm=get_llm(cs_config.model),
+            model_name=cs_config.model,
         )
 
     raise ValueError(f"unknown agent architecture: {settings.agent_architecture!r}")
