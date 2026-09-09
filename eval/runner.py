@@ -10,7 +10,7 @@ doesn't need its own per-behavior special-casing.
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -187,6 +187,8 @@ def run_eval(
     run_id: str | None = None,
     runs_dir: Path | None = None,
     delay_seconds: float = 0.0,
+    on_case_start: Callable[[TestCase, int, int], None] | None = None,
+    on_case_done: Callable[[TestCase, TestCaseResult], None] | None = None,
 ) -> RunRecord:
     """Run every test case against `adapter`, scoring each, and aggregate a `RunRecord`.
 
@@ -204,6 +206,11 @@ def run_eval(
     `delay_seconds`, if positive, is slept between cases (never before the
     first) to stay under a model provider's per-minute rate limit during a
     live run. 0 (the default) disables it.
+
+    `on_case_start`/`on_case_done`, if given, are called immediately before and
+    after each case (with `(case, index, total)` and `(case, result)`
+    respectively) -- e.g. to drive a progress bar. The runner itself has no
+    opinion on how progress is displayed; that's the caller's job.
     """
     resolved_run_id = run_id or uuid.uuid4().hex[:8]
     results: list[TestCaseResult] = []
@@ -216,14 +223,19 @@ def run_eval(
         summary={},
     )
 
+    total = len(cases)
     for index, case in enumerate(cases):
         if delay_seconds > 0 and index > 0:
             time.sleep(delay_seconds)
+        if on_case_start is not None:
+            on_case_start(case, index, total)
         try:
             result = run_test_case(adapter, case, run_dir)
         except Exception as exc:
             result = _errored_result(case, exc)
         results.append(result)
+        if on_case_done is not None:
+            on_case_done(case, result)
 
         record = record.model_copy(
             update={
