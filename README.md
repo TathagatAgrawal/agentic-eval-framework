@@ -1,8 +1,10 @@
 # Personal Financial Statement Q&A Agent
 
-An agentic system that answers natural-language questions about synthetic personal transaction data — spending by category, comparisons, trends, subscription price changes — grounded in real query results and transparent about how it got each number. See [design/project-overview.md](design/project-overview.md), [design/high-level-design.md](design/high-level-design.md), and [design/low-level-design.md](design/low-level-design.md) for the full design.
+An agentic system that answers natural-language questions about synthetic personal transaction data — spending by category, comparisons, trends, subscription price changes — grounded in real query results and transparent about how it got each number. See [design/project-overview.md](design/project-overview.md), [design/high-level-design.md](design/high-level-design.md), [design/low-level-design.md](design/low-level-design.md), [design/eval-harness-plan.md](design/eval-harness-plan.md), and [design/alternative-architectures-plan.md](design/alternative-architectures-plan.md) for the full design.
 
 Built with Python, [LangGraph](https://github.com/langchain-ai/langgraph)/[LangChain](https://github.com/langchain-ai/langchain), and Google Gemini. No real financial data is used — the dataset is synthetic and deterministically generated.
+
+The project has two parts: the **agent** itself, implemented as four interchangeable architectures behind one shared interface (Section "Agent architectures" below), and an **evaluation harness** that scores any of them on the same rule-based metrics with no LLM-as-judge. See [report/report.md](report/report.md) for a full comparison of the four architectures on the shared test set.
 
 ## Setup
 
@@ -13,8 +15,9 @@ Built with Python, [LangGraph](https://github.com/langchain-ai/langgraph)/[LangC
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 2. Install the project with dev dependencies
+# 2. Install the project with dev dependencies (add the `dashboard` extra for `eval dashboard`)
 pip install -e ".[dev]"
+# pip install -e ".[dev,dashboard]"
 
 # 3. Configure your Gemini API key
 cp .env.example .env
@@ -72,25 +75,59 @@ Assistant: The amount spent on groceries in Q1 2025 was $1,613.01, which is more
 
 Every turn's full reasoning trace — the resolved question, every tool call and result, the groundedness verdict, and the final answer — is written to `runs/<session_id>/<turn_id>.json` for inspection.
 
+## Agent architectures
+
+`AGENT_ARCHITECTURE` (in `.env`) selects which implementation `finance-qna ask`/`chat`/`eval run` drives — all four answer the same questions against the same tools and database, behind the identical `AgentAdapter.run_turn(question, prior_turns) -> RunTrace` interface (see [src/finance_qna/agent/README.md](src/finance_qna/agent/README.md)):
+
+| Value | Architecture | Summary |
+|---|---|---|
+| `langgraph` (default) | State machine | Explicit contextualize/route/act-tool_node-loop/draft/ground_check stages, built with LangGraph. |
+| `monolithic` | Monolithic ReAct | One system prompt, one tool-calling loop, one final call that routes and drafts together. |
+| `context_stuffing` | Context-stuffing | No tool calls; a precomputed summary of the whole dataset is injected into the draft prompt every turn. |
+| `plan_execute` | Plan-and-execute | Plans every needed tool call upfront in one batch, executes without interleaving, re-plans (not re-loops) if the draft is ungrounded. |
+
+None of the four is a strict winner — see [report/report.md](report/report.md) for the full, metric-by-metric comparison and the specific failure traces behind it.
+
+## Evaluation harness
+
+```bash
+# Run the full 15-case test set against whichever architecture AGENT_ARCHITECTURE selects
+finance-qna eval run --label my-run
+
+# Run just one suite, cap the number of cases, or throttle for a rate limit
+finance-qna eval run --suite single_turn --limit 5 --delay 5
+
+# Browse past runs (requires the `dashboard` extra)
+finance-qna eval dashboard
+```
+
+Results are saved to `eval/runs/<run_id>.json` (checkpointed after every case, so a rate-limit interruption never loses completed work) and a `rich`-rendered pass-rate report prints to the console. See [eval/README.md](eval/README.md) for the scorers, test-case schema, and how to add a new case or a new architecture to the comparison.
+
 ## Configuration
 
-Settings are read from `.env` (see `.env.example`) via `finance_qna.config.Settings`:
+Settings are read from `.env` (see `.env.example`). `src/finance_qna/config.py` holds only what every architecture needs; each architecture has its own `<PREFIX>_*` settings, so switching `AGENT_ARCHITECTURE` never leaves stale, irrelevant config lying around:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `GOOGLE_API_KEY` | — | required; your Gemini API key |
-| `AGENT_MODEL` | `gemini-3.5-flash-lite` | model used for the reasoning/tool-calling loop |
-| `CLASSIFIER_MODEL` | `gemini-3.5-flash-lite` | model used for routing/contextualizing |
+| `AGENT_ARCHITECTURE` | `langgraph` | which `AgentAdapter` to build: `langgraph`, `monolithic`, `context_stuffing`, or `plan_execute` |
 | `DB_PATH` | `data/synthetic_transactions.db` | path to the SQLite dataset |
-| `MAX_TOOL_STEPS` | `6` | cap on tool calls per turn |
-| `GROUNDEDNESS_RETRY_LIMIT` | `1` | retries allowed if a draft answer fails the groundedness check |
+| `EVAL_CASE_DELAY_SECONDS` | `0` | seconds to sleep between eval cases (see `eval run --delay`) |
+| `LANGGRAPH_AGENT_MODEL` / `LANGGRAPH_CLASSIFIER_MODEL` | `gemini-3.5-flash-lite` | models used by the `langgraph` architecture |
+| `LANGGRAPH_MAX_TOOL_STEPS` | `6` | cap on tool calls per turn (`langgraph`) |
+| `LANGGRAPH_GROUNDEDNESS_RETRY_LIMIT` | `1` | draft retries on a failed groundedness check (`langgraph`) |
+| `MONOLITHIC_MODEL` / `MONOLITHIC_MAX_TOOL_STEPS` | `gemini-3.5-flash-lite` / `6` | model and tool-step cap for the `monolithic` architecture |
+| `CONTEXT_STUFFING_MODEL` | `gemini-3.5-flash-lite` | model for the `context_stuffing` architecture |
+| `PLAN_EXECUTE_MODEL` / `PLAN_EXECUTE_GROUNDEDNESS_RETRY_LIMIT` | `gemini-3.5-flash-lite` / `1` | model and re-plan limit for the `plan_execute` architecture |
+
+See `.env.example` for the full, commented list.
 
 ## Development
 
 ```bash
 ruff format .          # format
 ruff check . --fix     # lint
-mypy src                # type-check (strict, scoped to src/finance_qna)
+mypy src eval           # type-check (strict, scoped to src/finance_qna and eval)
 pytest -q               # run the test suite
 ```
 
@@ -104,13 +141,16 @@ RUN_LIVE_TESTS=1 pytest tests/test_config.py
 
 ```
 src/finance_qna/
-├── config.py       # Settings + Gemini client factory
-├── data/           # schema, DB engine, synthetic data generator
-├── tools/          # the agent's only path to the data: typed, validated query/compare/trend tools
-├── agent/          # the LangGraph state machine (contextualize/route/act/tool_node/draft_answer/ground_check)
-├── memory/         # in-process, single-session conversational memory
-├── tracing/        # per-turn RunTrace JSON logging
-└── cli/            # `finance-qna` command-line entry point
+├── config.py       # universal Settings + Gemini client factory
+├── data/           # schema, DB engine, synthetic data generator          → src/finance_qna/data/README.md
+├── tools/          # the agent's only path to the data: typed, validated query/compare/trend tools → src/finance_qna/tools/README.md
+├── agent/          # the four AgentAdapter implementations + shared groundedness/answer/prompt code → src/finance_qna/agent/README.md
+├── tracing/        # per-turn RunTrace JSON logging                       → src/finance_qna/tracing/README.md
+└── cli/            # `finance-qna` command-line entry point               → src/finance_qna/cli/README.md
+
+eval/               # architecture-agnostic evaluation harness: schema, scorers, runner, store, dashboard → eval/README.md
+design/             # the design docs referenced throughout this README
+report/             # the four-architecture evaluation report
 ```
 
-An evaluation harness (`eval/`) that scores the agent on numeric correctness, groundedness, contextual correctness, clarification/refusal behavior, and efficiency is planned but not yet built — see the project overview's stated build order (agent first, harness second).
+Each subdirectory listed above has its own `README.md` with the detail specific to that module — start at the top-level one linked from a section above for whichever part you're touching.
