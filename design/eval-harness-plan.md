@@ -259,11 +259,13 @@ Stored as `eval/runs/<run_id>.json` (git-tracked — a run record is a few KB, a
 Extends the existing `finance-qna` Typer app (`src/finance_qna/cli/main.py`) rather than a separate binary:
 
 ```
-finance-qna eval run [--suite single_turn|multi_turn|all] [--label "prompt tweak X"]
+finance-qna eval run [--suite single_turn|multi_turn|all] [--label "prompt tweak X"] [--limit N] [--delay SECONDS]
 finance-qna eval dashboard
 ```
 
-There's no separate `--agent`/model flag on `eval run` itself: which architecture and model(s) run is controlled by the same `AGENT_ARCHITECTURE` (`Settings`, universal) and `LANGGRAPH_AGENT_MODEL`/`LANGGRAPH_CLASSIFIER_MODEL` (`LangGraphAgentConfig`, architecture-specific) environment variables that `finance-qna ask`/`chat` already read — set them once and every entry point picks it up, rather than eval having its own separate selection mechanism that could drift from what the CLI actually runs. `eval run` prints a summary table to the terminal (pass rate per metric/category) in addition to writing the `RunRecord`, so a quick prompt-iteration loop doesn't require opening the dashboard every time.
+There's no separate `--agent`/model flag on `eval run` itself: which architecture and model(s) run is controlled by the same `AGENT_ARCHITECTURE` (`Settings`, universal) and per-architecture config (e.g. `LangGraphAgentConfig`) environment variables that `finance-qna ask`/`chat` already read — set them once and every entry point picks it up, rather than eval having its own separate selection mechanism that could drift from what the CLI actually runs. `eval run` prints a summary table to the terminal (pass rate per metric/category) in addition to writing the `RunRecord`, so a quick prompt-iteration loop doesn't require opening the dashboard every time.
+
+`--limit N` caps the run to the first N cases (useful under a tight rate limit or for a quick check). `--delay SECONDS` (defaulting to `EVAL_CASE_DELAY_SECONDS`, 0 if unset) sleeps between cases — never before the first — inside `run_eval` itself (`eval/runner.py`), so a live run against a model with a strict per-minute quota doesn't need to be split into several manual `--limit` batches; `--delay 0` force-disables it regardless of the env var.
 
 ## 9. Dashboard
 

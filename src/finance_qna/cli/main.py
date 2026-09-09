@@ -11,6 +11,7 @@ the whole interface -- no web UI, and `chat` sessions are never persisted
 across process runs.
 """
 
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -96,12 +97,23 @@ def chat() -> None:
         prior_turns.append(trace)
 
 
+def _default_case_delay_seconds() -> float:
+    """Read the default inter-case delay from EVAL_CASE_DELAY_SECONDS (0 if unset)."""
+    return float(os.environ.get("EVAL_CASE_DELAY_SECONDS", "0"))
+
+
 @eval_app.command("run")
 def eval_run(
     suite: str = typer.Option("all", help="Which suite to run: single_turn, multi_turn, or all."),
     label: str = typer.Option("", help="A short label for this run, e.g. a git short-SHA."),
     limit: int | None = typer.Option(
         None, help="Only run the first N cases (useful under a tight rate limit)."
+    ),
+    delay: float | None = typer.Option(
+        None,
+        help="Seconds to sleep between cases (not before the first), to stay under a "
+        "provider's per-minute rate limit. Defaults to EVAL_CASE_DELAY_SECONDS (0 = "
+        "disabled). Pass 0 to force-disable regardless of that env var.",
     ),
 ) -> None:
     """Run the eval test set against the configured agent and print a pass-rate summary."""
@@ -124,11 +136,20 @@ def eval_run(
     if limit is not None:
         cases = cases[:limit]
     adapter = build_adapter(get_settings())
+    delay_seconds = _default_case_delay_seconds() if delay is None else delay
 
     run_id = uuid.uuid4().hex[:8]
     run_dir = repo_root / "runs" / f"eval-{run_id}"
     eval_runs_dir = repo_root / "eval" / "runs"
-    record = run_eval(adapter, cases, run_dir, label=label, run_id=run_id, runs_dir=eval_runs_dir)
+    record = run_eval(
+        adapter,
+        cases,
+        run_dir,
+        label=label,
+        run_id=run_id,
+        runs_dir=eval_runs_dir,
+        delay_seconds=delay_seconds,
+    )
 
     typer.echo(f"Run {record.run_id} ({len(record.results)} cases, agent={record.agent_id}):")
     errored = [r for r in record.results if r.error]

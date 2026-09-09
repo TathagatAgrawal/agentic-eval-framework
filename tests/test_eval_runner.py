@@ -7,6 +7,9 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+import eval.runner
 from eval.runner import run_eval, run_test_case, score_turn
 from eval.schema import ExpectedResult, TestCase, Turn
 from finance_qna.agent.answer import Claim, StructuredAnswer
@@ -335,3 +338,52 @@ def test_run_eval_saves_a_checkpoint_after_every_case(tmp_path: Path) -> None:
     # before case 1 runs: nothing saved yet; before case 2: case 1's result is
     # already on disk; before case 3: cases 1-2 are on disk
     assert adapter.saved_case_counts == [0, 1, 2]
+
+
+def test_run_eval_sleeps_between_cases_when_delay_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A positive delay_seconds must sleep once between each pair of cases --
+    never before the first case."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(eval.runner.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    trace = _trace(claims=[], ledger=[])
+    adapter = FakeAdapter(id="fake-1", responses=[trace, trace, trace])
+    cases = [
+        TestCase(
+            id=f"case_{i}",
+            category="c",
+            question=f"Q{i}",
+            expected=ExpectedResult(behavior="answer", value=1.0),
+        )
+        for i in range(3)
+    ]
+
+    run_eval(adapter, cases, tmp_path, delay_seconds=2.5)
+
+    assert sleeps == [2.5, 2.5]
+
+
+def test_run_eval_never_sleeps_when_delay_is_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """delay_seconds=0 (the default) must never call time.sleep."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(eval.runner.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    trace = _trace(claims=[], ledger=[])
+    adapter = FakeAdapter(id="fake-1", responses=[trace, trace])
+    cases = [
+        TestCase(
+            id=f"case_{i}",
+            category="c",
+            question=f"Q{i}",
+            expected=ExpectedResult(behavior="answer", value=1.0),
+        )
+        for i in range(2)
+    ]
+
+    run_eval(adapter, cases, tmp_path, delay_seconds=0)
+
+    assert sleeps == []

@@ -7,6 +7,7 @@ Every scorer runs unconditionally for every turn; each one already reports
 doesn't need its own per-behavior special-casing.
 """
 
+import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
@@ -185,6 +186,7 @@ def run_eval(
     label: str = "",
     run_id: str | None = None,
     runs_dir: Path | None = None,
+    delay_seconds: float = 0.0,
 ) -> RunRecord:
     """Run every test case against `adapter`, scoring each, and aggregate a `RunRecord`.
 
@@ -198,6 +200,10 @@ def run_eval(
     reflects whatever's actually on disk. `run_test_case` already isolates a
     failure to a single turn/case internally; this is the second, outer layer
     of that same guarantee, for anything that escapes it.
+
+    `delay_seconds`, if positive, is slept between cases (never before the
+    first) to stay under a model provider's per-minute rate limit during a
+    live run. 0 (the default) disables it.
     """
     resolved_run_id = run_id or uuid.uuid4().hex[:8]
     results: list[TestCaseResult] = []
@@ -210,7 +216,9 @@ def run_eval(
         summary={},
     )
 
-    for case in cases:
+    for index, case in enumerate(cases):
+        if delay_seconds > 0 and index > 0:
+            time.sleep(delay_seconds)
         try:
             result = run_test_case(adapter, case, run_dir)
         except Exception as exc:
