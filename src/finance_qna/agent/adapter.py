@@ -18,6 +18,7 @@ from finance_qna.agent.context_stuffing_adapter import (
 )
 from finance_qna.agent.langgraph_adapter import LangGraphAdapter, get_langgraph_config
 from finance_qna.agent.monolithic_adapter import MonolithicReactAdapter, get_monolithic_config
+from finance_qna.agent.plan_execute_adapter import PlanExecuteAdapter, get_plan_execute_config
 from finance_qna.config import Settings, get_llm
 from finance_qna.data.db import get_engine
 from finance_qna.tracing.trace import RunTrace
@@ -64,6 +65,15 @@ def build_adapter(settings: Settings) -> AgentAdapter:
             engine=engine,
             llm=get_llm(cs_config.model),
             model_name=cs_config.model,
+        )
+
+    if settings.agent_architecture == "plan_execute":
+        pe_config = get_plan_execute_config()
+        return PlanExecuteAdapter(
+            engine=engine,
+            llm=get_llm(pe_config.model),
+            model_name=pe_config.model,
+            groundedness_retry_limit=pe_config.groundedness_retry_limit,
         )
 
     raise ValueError(f"unknown agent architecture: {settings.agent_architecture!r}")

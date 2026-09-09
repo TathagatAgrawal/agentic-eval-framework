@@ -163,3 +163,40 @@ Question: {question}
 Ledger:
 {ledger}
 """
+
+# --- Plan-and-Execute architecture (agent/plan_execute_adapter.py) ---
+#
+# `contextualize`, `route`, `clarify`, `refuse`, and `draft_answer` are all
+# reused unchanged from the baseline; only the interleaved act/tool_node loop
+# is replaced, with these two prompts standing in for it. Both go through
+# `llm.bind_tools(...)` (native function-calling), not a custom structured
+# schema -- see the module docstring in `plan_execute_adapter.py` for why.
+
+PLAN_INSTRUCTIONS = """\
+Call every tool you need to fully answer the question below, all at once, in \
+this single turn -- you will not get to see any results and call more tools \
+afterward, so decide everything up front. Almost every question about the \
+user's spending needs at least one tool call.
+
+Use as few calls as possible: e.g. use group_by="category" on \
+aggregate_spending_tool instead of calling it once per category, and \
+compare_periods_tool instead of two separate aggregate_spending_tool calls for \
+two date ranges.
+
+Question: {question}
+"""
+
+REPLAN_INSTRUCTIONS = """\
+Your previous plan did not produce a fully verifiable answer.
+
+Previous plan's results (the "ledger"):
+{ledger}
+
+Claimed value(s) that could not be verified against the ledger: {unsupported}
+
+Call whatever ADDITIONAL tools you need, all at once, to get a verifiable \
+answer -- the ledger above is already available, so don't repeat a call whose \
+result you already have.
+
+Question: {question}
+"""
